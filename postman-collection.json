@@ -1,0 +1,270 @@
+{
+  "info": {
+    "_postman_id": "ecommerce-api-2026",
+    "name": "E-Commerce API Collection",
+    "description": "Complete API endpoints for multi-tenant e-commerce backend",
+    "version": "1.0.0",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "item": [
+    {
+      "name": "Auth",
+      "item": [
+        {
+          "name": "Login",
+          "request": {
+            "method": "POST",
+            "url": {
+              "raw": "{{base_url}}/auth/login",
+              "protocol": "http",
+              "host": ["{{base_url}}"],
+              "path": ["auth", "login"]
+            },
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "x-tenant-id",
+                "value": "{{tenant_id}}"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\"email\": \"admin@store.com\", \"password\": \"password123\"}"
+            }
+          }
+        },
+        {
+          "name": "Get Current User",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{base_url}}/auth/me",
+              "protocol": "http",
+              "host": ["{{base_url}}"],
+              "path": ["auth", "me"]
+            },
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{token}}"
+              },
+              {
+                "key": "x-tenant-id",
+                "value": "{{tenant_id}}"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "Products",
+      "item": [
+        {
+          "name": "Create Product",
+          "request": {
+            "method": "POST",
+            "url": {
+              "raw": "{{base_url}}/products/admin/products",
+              "protocol": "http",
+              "host": ["{{base_url}}"],
+              "path": ["products", "admin", "products"]
+            },
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{token}}"
+              },
+              {
+                "key": "x-tenant-id",
+                "value": "{{tenant_id}}"
+              }
+            ],
+            "body": {
+              "mode": "formdata",
+              "formdata": [
+                {
+                  "key": "name",
+                  "value": "T-Shirt",
+                  "type": "text"
+                },
+                {
+                  "key": "slug",
+                  "value": "t-shirt",
+                  "type": "text"
+                },
+                {
+                  "key": "sku",
+                  "value": "TSH-001",
+                  "type": "text"
+                },
+                {
+                  "key": "price",
+                  "value": "29.99",
+                  "type": "text"
+                },
+                {
+                  "key": "stock_qty",
+                  "value": "100",
+                  "type": "text"
+                },
+                {
+                  "key": "description",
+                  "value": "High quality t-shirt",
+                  "type": "text"
+                },
+                {
+                  "key": "is_published",
+                  "value": "true",
+                  "type": "text"
+                },
+                {
+                  "key": "images",
+                  "type": "file",
+                  "disabled": false
+                }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Get Products",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{base_url}}/products/admin/products?page=1&limit=20",
+              "protocol": "http",
+              "host": ["{{base_url}}"],
+              "path": ["products", "admin", "products"],
+              "query": [
+                {
+                  "key": "page",
+                  "value": "1"
+                },
+                {
+                  "key": "limit",
+                  "value": "20"
+                },
+                {
+                  "key": "is_published",
+                  "value": "true",
+                  "disabled": true
+                },
+                {
+                  "key": "search",
+                  "value": "",
+                  "disabled": true
+                }
+              ]
+            },
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{token}}"
+              },
+              {
+                "key": "x-tenant-id",
+                "value": "{{tenant_id}}"
+              }
+            ]
+          }
+        },
+        {
+          "name": "Get Product by ID",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{base_url}}/products/admin/products/{{product_id}}",
+              "protocol": "http",
+              "host": ["{{base_url}}"],
+              "path": ["products", "admin", "products", "{{product_id}}"]
+            },
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{token}}"
+              },
+              {
+                "key": "x-tenant-id",
+                "value": "{{tenant_id}}"
+              }
+            ]
+          }
+        },
+        {
+          "name": "Update Product",
+          "request": {
+            "method": "PUT",
+            "url": {
+              "raw": "{{base_url}}/products/admin/products/{{product_id}}",
+              "protocol": "http",
+              "host": ["{{base_url}}"],
+              "path": ["products", "admin", "products", "{{product_id}}"]
+            },
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{token}}"
+              },
+              {
+                "key": "x-tenant-id",
+                "value": "{{tenant_id}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\"price\": 39.99, \"stock_qty\": 50}"
+            }
+          }
+        },
+        {
+          "name": "Delete Product",
+          "request": {
+            "method": "DELETE",
+            "url": {
+              "raw": "{{base_url}}/products/admin/products/{{product_id}}",
+              "protocol": "http",
+              "host": ["{{base_url}}"],
+              "path": ["products", "admin", "products", "{{product_id}}"]
+            },
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{token}}"
+              },
+              {
+                "key": "x-tenant-id",
+                "value": "{{tenant_id}}"
+              }
+            ]
+          }
+        }
+      ]
+    }
+  ],
+  "variable": [
+    {
+      "key": "base_url",
+      "value": "http://localhost:3000"
+    },
+    {
+      "key": "tenant_id",
+      "value": "tenant-1"
+    },
+    {
+      "key": "token",
+      "value": ""
+    },
+    {
+      "key": "product_id",
+      "value": ""
+    }
+  ]
+}
