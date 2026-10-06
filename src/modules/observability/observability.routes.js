@@ -1,0 +1,10 @@
+const express = require('express');
+const { authenticate, authorize } = require('../../middleware/auth');
+const validate = require('../../middleware/validateRequest');
+const { asyncHandler } = require('../../utils/errors');
+const controller = require('./observability.controller'); const schemas = require('./observability.validator');
+const router = express.Router(); router.use(authenticate, authorize({ roles: ['ADMIN', 'SUPPORT'] }));
+router.get('/audit-logs', validate(schemas.auditListSchema), asyncHandler(controller.listAudit));
+router.get('/audit-logs/:id', validate(schemas.auditIdSchema), asyncHandler(controller.getAudit));
+router.get('/system-logs', validate(schemas.systemListSchema), asyncHandler(controller.listSystem));
+module.exports = router;

@@ -26,18 +26,15 @@ const normalizeConnectionString = (rawConnectionString) => {
     return rawConnectionString;
   }
 };
-console.log("aaaaaaaaaaaaaaaaaaaaaaa",process.env.DATABASE_URL);
 const connectionString = normalizeConnectionString(process.env.DATABASE_URL);
 
 const pool = new Pool({
   connectionString,
-
-  // ssl: isSslEnabled
-  //   ? {
-  //       rejectUnauthorized,
-  //     }
-  //   : false,
- ssl: false,
+  ssl: isSslEnabled
+    ? {
+        rejectUnauthorized,
+      }
+    : false,
 
   max: Number(process.env.DB_POOL_MAX || 10),
   idleTimeoutMillis: 10000,

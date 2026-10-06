@@ -6,7 +6,7 @@
   "scripts": {
     "start": "node src/server.js",
     "dev": "nodemon src/server.js",
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "node --test tests/auth.validation.test.js tests/address.service.test.js tests/auth.refresh-concurrency.test.js tests/integrationConfig.validation.test.js tests/logger.security.test.js tests/observability.test.js tests/product.capabilities.test.js tests/cart.validation.test.js tests/customerDirectory.service.test.js tests/order.service.test.js tests/orderPurchaseReview.service.test.js tests/checkout.service.test.js tests/shipping.service.test.js tests/payment.service.test.js tests/payment.repository.test.js tests/requestLogger.webhook.test.js tests/razorpay.webhook.postgres.test.js tests/reconciliation.service.test.js tests/inventory.service.test.js tests/dashboard.service.test.js tests/adminReports.test.js tests/adminListImages.test.js tests/notifications.service.test.js tests/notificationInbox.service.test.js tests/phaseA.tenant-enquiry-review.test.js tests/phaseB.enquiry-ownership.test.js tests/checkoutIdentity.service.test.js tests/checkoutSession.service.test.js tests/customerAuthVerification.service.test.js tests/passwordReset.integration.test.js tests/razorpay.provider.test.js"
   },
   "keywords": [
     "ecommerce",
@@ -17,6 +17,7 @@
   "author": "",
   "license": "MIT",
   "dependencies": {
+    "@ngrok/ngrok": "^1.7.0",
     "@supabase/supabase-js": "^2.101.1",
     "bcryptjs": "^2.4.3",
     "cookie-parser": "^1.4.6",
@@ -24,6 +25,7 @@
     "dotenv": "^16.3.1",
     "express": "^4.18.2",
     "express-rate-limit": "^7.4.1",
+    "google-auth-library": "^10.9.1",
     "helmet": "^8.0.0",
     "joi": "^17.11.0",
     "jsonwebtoken": "^9.0.2",

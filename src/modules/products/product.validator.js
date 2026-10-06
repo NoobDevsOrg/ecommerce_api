@@ -18,6 +18,8 @@ const createProductSchema = Joi.object({
     collection_id: Joi.string().allow('', null),
     is_published: Joi.boolean().default(false),
     is_featured: Joi.boolean().default(false),
+    is_purchasable: Joi.boolean().default(true),
+    is_enquiry_enabled: Joi.boolean().default(true),
     tags: Joi.array().items(Joi.string()).default([]),
     attributes: Joi.object().default({}),
     meta_title: Joi.string().max(255).allow('', null),
@@ -27,7 +29,7 @@ const createProductSchema = Joi.object({
 });
 
 const enquirySchema = Joi.object({
-  body: ({
+  body: Joi.object({
     name: Joi.string().min(2).max(100).required(),
 
     email: Joi.string().email().required(),
@@ -36,18 +38,20 @@ const enquirySchema = Joi.object({
       .pattern(/^[0-9]{10}$/)
       .required(),
 
-    message: Joi.string().allow("").optional(),
+    message: Joi.string().max(2000).allow("").optional(),
 
     // product_id: Joi.string().required(),
     // product_name: Joi.string().required(),
     products: Joi.array()
       .items(
         Joi.object({
-          product_id: Joi.string().required(),
+          product_id: Joi.string().trim().max(100).required(),
           quantity: Joi.number().integer().min(1).default(1),
         })
       )
       .min(1)
+      .max(100)
+      .unique('product_id')
       .required(),
 
     use_whatsapp: Joi.boolean().optional(),
@@ -62,9 +66,42 @@ const enquirySchema = Joi.object({
         }),
       otherwise: Joi.optional().allow(null, ""),
     }),
-    tenant_id: Joi.string().optional(),
   })
+  .required(),
+  ...baseEnvelope,
+});
 
+const enquiryStatuses = ['new', 'contacted', 'closed'];
+const listEnquiriesSchema = Joi.object({
+  params: Joi.object({}).default({}),
+  query: Joi.object({
+    page: Joi.number().integer().min(1).default(1),
+    limit: Joi.number().integer().min(1).max(100).default(20),
+    search: Joi.string().trim().max(100).allow('').default(''),
+    status: Joi.string().valid(...enquiryStatuses, 'all').default('all'),
+  }).default({}),
+  body: Joi.object({}).default({}),
+});
+
+const enquiryCountSchema = Joi.object({
+  params: Joi.object({}).default({}),
+  query: Joi.object({ status: Joi.string().valid(...enquiryStatuses).default('new') }).default({}),
+  body: Joi.object({}).default({}),
+});
+
+const customerEnquiryHistorySchema = Joi.object({
+  params: Joi.object({}).default({}),
+  query: Joi.object({
+    page: Joi.number().integer().min(1).default(1),
+    limit: Joi.number().integer().min(1).max(100).default(20),
+  }).default({}),
+  body: Joi.object({}).default({}),
+});
+
+const updateEnquiryStatusSchema = Joi.object({
+  params: Joi.object({ id: Joi.string().guid({ version: ['uuidv4', 'uuidv5'] }).required() }).required(),
+  body: Joi.object({ status: Joi.string().valid(...enquiryStatuses).required() }).required(),
+  query: Joi.object({}).default({}),
 });
 
 const productIdParamsSchema = Joi.object({
@@ -73,6 +110,11 @@ const productIdParamsSchema = Joi.object({
   }).required(),
   body: Joi.object({}).default({}),
   query: Joi.object({}).default({}),
+});
+
+const productSlugParamsSchema = Joi.object({
+  params: Joi.object({ slug: Joi.string().trim().min(3).max(255).required() }).required(),
+  body: Joi.object({}).default({}), query: Joi.object({}).default({}),
 });
 
 const updateProductSchema = Joi.object({
@@ -86,11 +128,12 @@ const updateProductSchema = Joi.object({
     description: Joi.string().max(5000).allow(''),
     price: Joi.number().positive().precision(2),
     compare_price: Joi.number().positive().precision(2).allow(null),
-    stock_qty: Joi.number().integer().min(0),
     category_id: Joi.string().allow('', null),
     collection_id: Joi.string().allow('', null),
     is_published: Joi.boolean(),
     is_featured: Joi.boolean(),
+    is_purchasable: Joi.boolean(),
+    is_enquiry_enabled: Joi.boolean(),
     tags: Joi.array().items(Joi.string()),
     attributes: Joi.object(),
     meta_title: Joi.string().max(255).allow('', null),
@@ -206,6 +249,16 @@ const reorderHeroBannersSchema = Joi.object({
   }).required(),
 });
 
+const testimonialIdSchema = Joi.object({ params: Joi.object({ testimonialId: Joi.string().required() }).required(), body: Joi.object({}).default({}), query: Joi.object({}).default({}) });
+const testimonialFields = {
+  customer_name: Joi.string().trim().max(120), customer_context: Joi.string().trim().max(160).allow('', null), content: Joi.string().trim().max(400), rating: Joi.number().integer().min(1).max(5).allow('', null), image_fit: Joi.string().valid('cover', 'contain'), image_position_x: Joi.number().integer().min(0).max(100), image_position_y: Joi.number().integer().min(0).max(100), is_active: Joi.boolean(), remove_image: Joi.boolean(),
+};
+const createTestimonialSchema = Joi.object({ params: Joi.object({}).default({}), query: Joi.object({}).default({}), body: Joi.object({ ...testimonialFields, customer_name: Joi.string().trim().max(120).required(), content: Joi.string().trim().max(400).required() }).required() });
+const updateTestimonialSchema = Joi.object({ params: Joi.object({ testimonialId: Joi.string().required() }).required(), query: Joi.object({}).default({}), body: Joi.object(testimonialFields).min(1).required() });
+const testimonialActiveSchema = Joi.object({ params: Joi.object({ testimonialId: Joi.string().required() }).required(), query: Joi.object({}).default({}), body: Joi.object({ is_active: Joi.boolean().required() }).required() });
+const reorderTestimonialsSchema = Joi.object({ params: Joi.object({}).default({}), query: Joi.object({}).default({}), body: Joi.object({ ordered_ids: Joi.array().items(Joi.string().required()).max(100).required() }).required() });
+const testimonialSettingsSchema = Joi.object({ params: Joi.object({}).default({}), query: Joi.object({}).default({}), body: Joi.object({ enabled: Joi.boolean().required(), heading: Joi.string().trim().max(160).required(), subheading: Joi.string().trim().max(500).allow('').required(), max_cards: Joi.number().integer().min(1).max(20).required(), card_size: Joi.string().valid('compact', 'standard', 'large').required(), spacing: Joi.string().valid('compact', 'standard', 'relaxed').required(), desktop_visible_count: Joi.number().valid(2, 3, 4).required(), tablet_visible_count: Joi.number().valid(1, 1.2, 2, 3).required(), mobile_visible_count: Joi.number().valid(1, 1.2, 2).required() }).required() });
+
 const generateReviewInvitationSchema = Joi.object({
   params: Joi.object({
     enquiryId: Joi.string().required(),
@@ -225,6 +278,14 @@ const submitReviewSchema = Joi.object({
   query: Joi.object({}).default({}),
 });
 
+const reviewInvitationParamsSchema = Joi.object({
+  params: Joi.object({
+    inviteCode: Joi.string().trim().max(128).required(),
+  }).required(),
+  body: Joi.object({}).default({}),
+  query: Joi.object({}).default({}),
+});
+
 const reviewParamsSchema = Joi.object({
   params: Joi.object({
     productId: Joi.string().required(),
@@ -236,8 +297,10 @@ const reviewParamsSchema = Joi.object({
 module.exports = {
   createProductSchema,
   enquirySchema,
+  customerEnquiryHistorySchema,
   updateProductSchema,
   productIdParamsSchema,
+  productSlugParamsSchema,
   getProductsSchema,
   getPublicProductsSchema,
   updateProductImagesSchema,
@@ -247,7 +310,17 @@ module.exports = {
   updateHeroBannerSchema,
   publishHeroBannerSchema,
   reorderHeroBannersSchema,
+  testimonialIdSchema,
+  createTestimonialSchema,
+  updateTestimonialSchema,
+  testimonialActiveSchema,
+  reorderTestimonialsSchema,
+  testimonialSettingsSchema,
   generateReviewInvitationSchema,
   submitReviewSchema,
+  reviewInvitationParamsSchema,
   reviewParamsSchema,
+  listEnquiriesSchema,
+  enquiryCountSchema,
+  updateEnquiryStatusSchema,
 };

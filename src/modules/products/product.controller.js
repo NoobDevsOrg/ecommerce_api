@@ -1,13 +1,22 @@
 const productService = require('./product.service');
 const heroBannerService = require('./heroBanner.service');
+const testimonialService = require('./testimonial.service');
 const Logger = require('../../utils/logger');
 const ResponseFormatter = require('../../utils/response');
-const { NotFoundError } = require('../../utils/errors');
+const { NotFoundError, AuthorizationError } = require('../../utils/errors');
+const { resolvePublicCapabilities } = require('./productCapabilities');
+const audit = require('../../services/audit.service');
 
 
 
 const publicProductCache = new Map();
+const auditBestEffort = (req, event) => void audit.record(audit.eventFromRequest(req, event))
+  .catch((error) => Logger.warn('Business audit persistence failed', { requestId: req.requestId, message: error.message }));
 const PUBLIC_CACHE_TTL_MS = Number(process.env.PUBLIC_PRODUCT_CACHE_TTL_MS || 30000);
+const toPublicPrice = (value) => {
+  const price = Number(value);
+  return Number.isFinite(price) && price > 0 ? price : null;
+};
 
 const setPublicCache = (key, value) => {
   publicProductCache.set(key, {
@@ -30,11 +39,20 @@ const getPublicCache = (key) => {
   return cacheEntry.value;
 };
 
+const invalidatePublicProductCache = (tenantId) => {
+  for (const key of publicProductCache.keys()) {
+    if (key.startsWith(`${tenantId}:`)) publicProductCache.delete(key);
+  }
+};
+exports.invalidatePublicProductCache = invalidatePublicProductCache;
+
 exports.createProduct = async (req, res) => {
   const tenantId = req.tenantId;
   const imageFiles = req.files || [];
 
   const data = await productService.createProduct(tenantId, req.body, imageFiles);
+  invalidatePublicProductCache(tenantId);
+  auditBestEffort(req, { tenantId, entityType: 'PRODUCT', entityId: data.id, action: 'PRODUCT_CREATED', afterSnapshot: data });
 
   Logger.info('Product created successfully', { productId: data.id, name: data.name });
   return ResponseFormatter.send(res, {
@@ -47,155 +65,68 @@ exports.createProduct = async (req, res) => {
 
 
 exports.handleEnquiry = async (req, res) => {
-  try {
-    // // 1. Validate using Joi
-    // const { error, value } = enquirySchema.validate(req.body, {
-    //   abortEarly: false, // show all errors
-    // });
+  // customer_id is intentionally never read from the request payload. A
+  // valid staff session is still allowed to submit the public flow, but is
+  // not a customer ownership identity.
+  const customerId = req.user?.customer_id && !req.user?.staff_user_id
+    ? req.user.customer_id
+    : null;
+  const enquiry = await productService.processEnquiry(req.tenantId, customerId, req.body);
+  Logger.info('Enquiry created successfully', { enquiryId: enquiry.id, tenantId: req.tenantId });
+  return ResponseFormatter.send(res, {
+    statusCode: 201,
+    message: 'Enquiry submitted successfully',
+    data: { id: enquiry.id },
+  });
+};
 
-    // if (error) {
-    //   return ResponseFormatter.send(res, {
-    //     statusCode: 422,
-    //     message: "Validation failed",
-    //     data: error.details.map((err) => ({
-    //       field: err.path[0],
-    //       message: err.message,
-    //     })),
-    //   });
-    // }
-
-    // 2. Service call
-    console.log("controller req.body =", req.body);
-    const enquiry = await productService.processEnquiry(req.body);
-
-    // 3. Log success
-    Logger.info("Enquiry created successfully", {
-      enquiryId: enquiry.id,
-      email: enquiry.email,
-    });
-
-    // 4. Response
-    return ResponseFormatter.send(res, {
-      statusCode: 201,
-      message: "Enquiry submitted successfully",
-      data: {
-        id: enquiry.id,
-      },
-    });
-
-  } catch (error) {
-    Logger.error("Unhandled enquiry error", {
-      error: error.message,
-      stack: error.stack,
-    });
-
-    return ResponseFormatter.send(res, {
-      statusCode: 500,
-      message: "Something went wrong. Please try again.",
-    });
+exports.getMyEnquiries = async (req, res) => {
+  if (!req.user?.customer_id || req.user?.staff_user_id) {
+    throw new AuthorizationError('Customer authentication is required');
   }
+
+  const result = await productService.getCustomerEnquiries(
+    req.tenantId,
+    req.user.customer_id,
+    req.query
+  );
+
+  return ResponseFormatter.send(res, {
+    statusCode: 200,
+    message: 'Customer enquiries fetched successfully',
+    data: result,
+  });
 };
 
 //GET /enquiries
 exports.getEnquiries = async (req, res) => {
-  try {
-    const { page, limit, search, status } = req.query;
-
-    const result = await productService.getEnquiries({
-      page,
-      limit,
-      search,
-      status,
-    });
-
-    console.log("result pagination", result)
-
-    return ResponseFormatter.send(res, {
-      statusCode: 200,
-      message: "Enquiries fetched successfully",
-      data: result,
-    });
-
-  } catch (error) {
-    Logger.error("Get enquiries controller error", {
-      message: error.message,
-      query: req.query,
-    });
-
-    return ResponseFormatter.send(res, {
-      statusCode: 500,
-      message: "Failed to fetch enquiries",
-    });
-  }
+  const result = await productService.getEnquiries(req.tenantId, req.query);
+  return ResponseFormatter.send(res, {
+    statusCode: 200,
+    message: 'Enquiries fetched successfully',
+    data: result,
+  });
 };
 
 //GET /enquiries/count?status=new
 exports.getEnquiryCount = async (req, res) => {
-  try {
-    const { status = "new" } = req.query;
-
-    const result = await productService.getEnquiryCount({ status });
-
-    return ResponseFormatter.send(res, {
-      statusCode: 200,
-      message: "Enquiry count fetched successfully",
-      data: result,
-    });
-
-  } catch (error) {
-    Logger.error("Get enquiry count controller error", {
-      message: error.message,
-    });
-
-    return ResponseFormatter.send(res, {
-      statusCode: 500,
-      message: "Failed to fetch enquiry count",
-    });
-  }
+  const result = await productService.getEnquiryCount(req.tenantId, req.query.status);
+  return ResponseFormatter.send(res, {
+    statusCode: 200,
+    message: 'Enquiry count fetched successfully',
+    data: result,
+  });
 };
 
 // PATCH /enquiries/:id/status
 exports.updateEnquiryStatus = async (req, res) => {
-  try {
-    const { id } = req.params;
-    const { status } = req.body;
-
-    // basic validation (you can move this to Joi middleware)
-    const allowedStatus = ["new", "contacted", "closed"];
-
-    if (!allowedStatus.includes(status)) {
-      return ResponseFormatter.send(res, {
-        statusCode: 422,
-        message: "Invalid status value",
-      });
-    }
-
-    const updated = await productService.updateEnquiryStatus(id, status);
-
-    return ResponseFormatter.send(res, {
-      statusCode: 200,
-      message: "Enquiry status updated successfully",
-      data: updated,
-    });
-
-  } catch (error) {
-    Logger.error("Update enquiry status controller error", {
-      id: req.params.id,
-      message: error.message,
-    });
-
-    if (error.message === "Enquiry not found") {
-      return ResponseFormatter.send(res, {
-        statusCode: 404,
-        message: "Enquiry not found",
-      });
-    }
-
-    return ResponseFormatter.send(res, {
-      statusCode: 500,
-      message: "Failed to update enquiry status",
-    });
-  }
+  const updated = await productService.updateEnquiryStatus(req.tenantId, req.params.id, req.body.status);
+  auditBestEffort(req, { tenantId: req.tenantId, entityType: 'ENQUIRY', entityId: req.params.id, action: 'ENQUIRY_STATUS_UPDATED', afterSnapshot: updated });
+  return ResponseFormatter.send(res, {
+    statusCode: 200,
+    message: 'Enquiry status updated successfully',
+    data: updated,
+  });
 };
 
 exports.getProductList = async (req, res) => {
@@ -246,7 +177,7 @@ exports.getProductById = async (req, res) => {
   const baseApiUrl = resolveBaseApiUrl(req);
 
   const data = await productService.getProductById(tenantId, productId);
-  const formattedData = formatProductResponse(data, baseApiUrl);
+  const formattedData = formatAdminProductResponse(data, baseApiUrl);
 
   Logger.info('Product fetched by ID', { productId });
   return ResponseFormatter.send(res, {
@@ -267,6 +198,8 @@ exports.updateProduct = async (req, res) => {
   const imageFiles = req.files || [];
 
   const data = await productService.updateProduct(tenantId, productId, req.body, imageFiles);
+  invalidatePublicProductCache(tenantId);
+  auditBestEffort(req, { tenantId, entityType: 'PRODUCT', entityId: productId, action: 'PRODUCT_UPDATED', afterSnapshot: data });
 
   Logger.info('Product updated successfully', { productId });
   return ResponseFormatter.send(res, {
@@ -281,6 +214,8 @@ exports.deleteProduct = async (req, res) => {
   const tenantId = req.tenantId;
 
   const result = await productService.deleteProduct(tenantId, productId);
+  invalidatePublicProductCache(tenantId);
+  auditBestEffort(req, { tenantId, entityType: 'PRODUCT', entityId: productId, action: 'PRODUCT_DISABLED', afterSnapshot: result });
 
   Logger.info('Product deleted successfully', { productId });
   return ResponseFormatter.send(res, {
@@ -361,6 +296,15 @@ exports.getPublicHeroBanners = async (req, res) => {
   return ResponseFormatter.send(res, { statusCode: 200, message: 'Hero banners fetched successfully', data });
 };
 
+exports.listTestimonials = async (req, res) => ResponseFormatter.send(res, { statusCode: 200, message: 'Testimonials fetched successfully', data: await testimonialService.listAdmin(req.tenantId) });
+exports.createTestimonial = async (req, res) => ResponseFormatter.send(res, { statusCode: 201, message: 'Testimonial created successfully', data: await testimonialService.create(req.tenantId, req.body, req.file) });
+exports.updateTestimonial = async (req, res) => ResponseFormatter.send(res, { statusCode: 200, message: 'Testimonial updated successfully', data: await testimonialService.update(req.tenantId, req.params.testimonialId, req.body, req.file) });
+exports.deleteTestimonial = async (req, res) => ResponseFormatter.send(res, { statusCode: 200, message: 'Testimonial removed successfully', data: await testimonialService.remove(req.tenantId, req.params.testimonialId) });
+exports.setTestimonialActive = async (req, res) => ResponseFormatter.send(res, { statusCode: 200, message: 'Testimonial status updated', data: await testimonialService.setActive(req.tenantId, req.params.testimonialId, req.body.is_active) });
+exports.reorderTestimonials = async (req, res) => ResponseFormatter.send(res, { statusCode: 200, message: 'Testimonial order updated', data: await testimonialService.reorder(req.tenantId, req.body.ordered_ids) });
+exports.saveTestimonialSettings = async (req, res) => ResponseFormatter.send(res, { statusCode: 200, message: 'Testimonial settings saved', data: await testimonialService.saveSettings(req.tenantId, req.body) });
+exports.getPublicTestimonials = async (req, res) => ResponseFormatter.send(res, { statusCode: 200, message: 'Testimonials fetched successfully', data: await testimonialService.listPublic(req.tenantId) });
+
 exports.getPublicProducts = async (req, res) => {
   const tenantId = req.tenantId;
   const baseApiUrl = resolveBaseApiUrl(req);
@@ -387,15 +331,18 @@ exports.getPublicProducts = async (req, res) => {
     slug: product.slug,
     sku: product.sku,
     description: product.description,
-    price: parseFloat(product.price),
+    price: toPublicPrice(product.price),
     compare_price: product.compare_price ? parseFloat(product.compare_price) : null,
     stock_qty: product.stock_qty,
     category_id: product.category_id,
     category_name: product.category_name,
+    collection_id: product.collection_id,
+    collection_name: product.collection_name,
     image_urls: product.image_urls,
     is_published: product.is_published,
     is_featured: product.is_featured,
     is_best_sell: product.is_best_sell,
+    ...resolvePublicCapabilities(product),
     thumbnail_url: buildImageUrl(product.primary_image_url, baseApiUrl),
     average_rating: Number(Number(product.average_rating || 0).toFixed(1)),
     review_count: Number(product.review_count || 0),
@@ -466,6 +413,12 @@ exports.getPublicProductById = async (req, res) => {
   });
 };
 
+exports.getPublicProductBySlug = async (req, res) => {
+  const product = await productService.getProductBySlug(req.tenantId, req.params.slug);
+  if (!product.is_published) throw new NotFoundError('Product');
+  return ResponseFormatter.send(res, { statusCode: 200, message: 'Product fetched successfully', data: formatProductResponse(product, resolveBaseApiUrl(req)) });
+};
+
 const formatProductResponse = (product, baseApiUrl) => {
   const normalizedImages = (product.images || [])
     .slice()
@@ -492,7 +445,7 @@ const formatProductResponse = (product, baseApiUrl) => {
     slug: product.slug,
     sku: product.sku,
     description: product.description,
-    price: parseFloat(product.price),
+    price: toPublicPrice(product.price),
     compare_price: product.compare_price ? parseFloat(product.compare_price) : null,
     stock_qty: product.stock_qty,
     category_id: product.category_id,
@@ -502,6 +455,7 @@ const formatProductResponse = (product, baseApiUrl) => {
     is_published: product.is_published,
     is_featured: product.is_featured,
     is_best_sell: product.is_best_sell,
+    ...resolvePublicCapabilities(product),
     meta_title: product.meta_title,
     meta_desc: product.meta_desc,
     primary_image_url: primaryImage ? primaryImage.url : null,
@@ -512,6 +466,14 @@ const formatProductResponse = (product, baseApiUrl) => {
     updated_at: product.updated_at,
   };
 };
+
+// Admin receives the stored switches so it can distinguish commercial intent
+// from the public effective purchase capability (which also requires price).
+const formatAdminProductResponse = (product, baseApiUrl) => ({
+  ...formatProductResponse(product, baseApiUrl),
+  is_purchasable: Boolean(product.is_purchasable),
+  is_enquiry_enabled: Boolean(product.is_enquiry_enabled),
+});
 
 const buildImageUrl = (baseUrl, baseApiUrl) => {
   if (!baseUrl) return null;
@@ -538,9 +500,7 @@ const resolveBaseApiUrl = (req) => {
 
 exports.getAdminReviews = async (req, res, next) => {
   try {
-    console.log(" req.user =", req.user);
     const tenantId = req.user.tenant_id;
-    console.log("tenantId =", tenantId);
     const {
       page = 1,
       limit = 20,
@@ -566,15 +526,8 @@ exports.getAdminReviews = async (req, res, next) => {
 
 exports.generateReviewInvitations = async (req, res, next) => {
   try {
-
-    console.log("req.params =", req.params);
-    console.log("req.user =", req.user);
-
     const tenantId = req.user.tenant_id;
     const { enquiryId } = req.params;
-
-    console.log("tenantId =", tenantId);
-    console.log("enquiryId =", enquiryId);
 
     const result = await productService.generateReviewInvitations(
       tenantId,
@@ -595,7 +548,7 @@ exports.getReviewInvitation = async (req, res, next) => {
   try {
     const { inviteCode } = req.params;
 
-    const result = await productService.getReviewInvitation(inviteCode);
+    const result = await productService.getReviewInvitation(req.tenantId, inviteCode);
 
     return res.status(200).json({
       success: true,
@@ -613,6 +566,7 @@ exports.submitProductReview = async (req, res, next) => {
     const { rating, review } = req.body;
 
     const result = await productService.submitProductReview(
+      req.tenantId,
       inviteCode,
       rating,
       review
@@ -637,6 +591,7 @@ exports.approveReview = async (req, res, next) => {
       tenantId,
       reviewId
     );
+    auditBestEffort(req, { tenantId, entityType: 'REVIEW', entityId: reviewId, action: 'REVIEW_APPROVED', afterSnapshot: result });
 
     return res.status(200).json({
       success: true,
@@ -652,7 +607,7 @@ exports.getProductReviews = async (req, res, next) => {
   try {
     const { productId } = req.params;
 
-    const result = await productService.getProductReviews(productId);
+    const result = await productService.getProductReviews(req.tenantId, productId);
 
     return res.status(200).json({
       success: true,
@@ -670,9 +625,11 @@ exports.updateReviewStatus = async (req, res, next) => {
     const { approved } = req.body;
 
     const result = await productService.updateReviewStatus(
+      req.tenantId,
       reviewId,
       approved
     );
+    auditBestEffort(req, { tenantId: req.tenantId, entityType: 'REVIEW', entityId: reviewId, action: 'REVIEW_STATUS_UPDATED', afterSnapshot: result });
 
     return res.json({
       success: true,
@@ -689,10 +646,12 @@ exports.updateReview = async (req, res, next) => {
     const { rating, review } = req.body;
 
     const result = await productService.updateReview(
+      req.tenantId,
       reviewId,
       rating,
       review
     );
+    auditBestEffort(req, { tenantId: req.tenantId, entityType: 'REVIEW', entityId: reviewId, action: 'REVIEW_UPDATED', afterSnapshot: result });
 
     res.status(200).json({
       success: true,

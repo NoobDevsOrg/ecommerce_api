@@ -1,10 +1,12 @@
 const pool = require('../../config/db');
 const { v4: uuidv4 } = require('uuid');
 const Logger = require('../../utils/logger');
-const { AppError, ConflictError, NotFoundError } = require('../../utils/errors');
+const { AppError, ConflictError, NotFoundError, AuthorizationError } = require('../../utils/errors');
 const { uploadToSupabase } = require('../../services/uploadService');
 const { supabase } = require('../../config/supabase');
 const crypto = require("crypto");
+const notifications = require('../orders/orderNotification.service');
+const audit = require('../../services/audit.service');
 // const { sendAdminEmail, sendUserEmail } = require("../services/email.service");
 
 const ALLOWED_SORT_COLUMNS = new Set(['created_at', 'name', 'price']);
@@ -43,6 +45,8 @@ exports.createProduct = async (tenantId, productData, imageFiles = []) => {
       collection_id,
       is_published,
       is_featured,
+      is_purchasable,
+      is_enquiry_enabled,
       is_best_sell,
       tags,
       attributes,
@@ -93,9 +97,9 @@ exports.createProduct = async (tenantId, productData, imageFiles = []) => {
       `INSERT INTO PRODUCTS (
         id, tenant_id, category_id, collection_id, name, slug, sku,
         description, price, compare_price, stock_qty, is_published,
-        is_featured,is_best_sell, tags, attributes, meta_title, meta_desc, created_by
+        is_featured, is_purchasable, is_enquiry_enabled, is_best_sell, tags, attributes, meta_title, meta_desc, created_by
       ) VALUES (
-        $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19
+        $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21
       ) RETURNING *`,
       [
         productId,
@@ -111,6 +115,8 @@ exports.createProduct = async (tenantId, productData, imageFiles = []) => {
         stock_qty || 0,
         is_published || false,
         is_featured || false,
+        is_purchasable,
+        is_enquiry_enabled,
         is_best_sell || false,
         tags || null,
         attributes || null,
@@ -121,6 +127,14 @@ exports.createProduct = async (tenantId, productData, imageFiles = []) => {
     );
 
     const product = productResult.rows[0];
+    if (Number(product.stock_qty) > 0) {
+      await client.query(
+        `INSERT INTO INVENTORY_TRANSACTIONS
+         (id, tenant_id, product_id, transaction_type, quantity_delta, before_quantity, after_quantity, reason, actor_type, actor_id)
+         VALUES ($1, $2, $3, 'ADMIN_RESTOCK', $4, 0, $4, 'Initial catalog stock', 'SYSTEM', 'product-onboarding')`,
+        [uuidv4(), tenantId, productId, Number(product.stock_qty)]
+      );
+    }
 
     // Handle image uploads (Supabase)
     if (imageFiles && imageFiles.length > 0) {
@@ -178,13 +192,14 @@ exports.createProduct = async (tenantId, productData, imageFiles = []) => {
   }
 };
 
-exports.processEnquiry = async (enquiryData) => {
+exports.processEnquiry = async (tenantId, customerId, enquiryData) => {
   const client = await pool.connect();
 
   try {
     await client.query("BEGIN");
 
     const enquiryId = uuidv4();
+    const enquiryReference = `ENQ-${new Date().toISOString().slice(0, 10).replaceAll('-', '')}-${crypto.randomBytes(4).toString('hex').toUpperCase()}`;
 
     const {
       name,
@@ -193,34 +208,66 @@ exports.processEnquiry = async (enquiryData) => {
       message,
       products,
       whatsapp_number,
-      tenant_id,
     } = enquiryData;
 
-    console.log("Processing enquiry", enquiryData);
+    // A customer association is optional, but when a customer session was
+    // supplied it must belong to the resolved server-side tenant. This blocks
+    // cross-tenant ownership without relying on a browser-provided id.
+    if (customerId) {
+      const customerResult = await client.query(
+        `SELECT id
+         FROM CUSTOMERS
+         WHERE id = $1 AND tenant_id = $2`,
+        [customerId, tenantId]
+      );
+
+      if (customerResult.rows.length === 0) {
+        throw new AuthorizationError('Customer tenant mismatch');
+      }
+    }
+
+    const productIds = products.map((item) => item.product_id);
+    const productsResult = await client.query(
+      `SELECT id
+       FROM PRODUCTS
+       WHERE tenant_id = $1
+         AND id = ANY($2::text[])
+         AND is_deleted = false
+         AND is_published = true
+         AND is_enquiry_enabled = true`,
+      [tenantId, productIds]
+    );
+    if (productsResult.rows.length !== productIds.length) {
+      throw new AppError('One or more products are unavailable for enquiry', 400, 'ENQUIRY_PRODUCT_UNAVAILABLE');
+    }
 
     // 🔹 Insert enquiry
     const result = await client.query(
       `INSERT INTO ENQUIRIES (
     id,
+    reference,
     name,
     email,
     phone,
     whatsapp_number,
     message,
     tenant_id,
+    customer_id,
     created_at
   ) VALUES (
-    $1,$2,$3,$4,$5,$6,$7,NOW()
+    $1,$2,$3,$4,$5,$6,$7,$8,$9,NOW()
   )
   RETURNING *`,
       [
         enquiryId,
+        enquiryReference,
         name,
         email,
         phone,
         whatsapp_number || null,
         message || null,
-        tenant_id || null,
+        tenantId,
+        customerId || null,
       ]
     );
 
@@ -244,12 +291,30 @@ exports.processEnquiry = async (enquiryData) => {
           enquiryId,
           item.product_id,
           item.quantity || 1,
-          enquiryData.tenant_id || null,
+          tenantId,
           "system",
           "system",
         ]
       );
     }
+
+    // The enquiry remains the business transaction. Its Admin notification
+    // and durable email-outbox item are committed with it; SMTP runs later.
+    await notifications.enqueueInTransaction(client, {
+      tenantId,
+      eventType: 'ENQUIRY_RECEIVED',
+      entityType: 'ENQUIRY',
+      entityId: enquiryId,
+    });
+    await audit.write(client, {
+      tenantId,
+      entityType: 'ENQUIRY',
+      entityId: enquiryId,
+      action: 'ENQUIRY_RECEIVED_NOTIFICATION_QUEUED',
+      actorType: customerId ? 'CUSTOMER' : 'SYSTEM',
+      actorId: customerId || null,
+      afterSnapshot: { event_type: 'ENQUIRY_RECEIVED', notification_key: `ENQUIRY_RECEIVED:${enquiryId}` },
+    });
 
     // 🔹 Send emails (non-blocking optional)
     // try {
@@ -267,10 +332,13 @@ exports.processEnquiry = async (enquiryData) => {
 
     await client.query("COMMIT");
 
+    // Deliberately post-commit: a temporary SMTP failure cannot lose the enquiry.
+    notifications.dispatchSafely({ tenantId, entityId: enquiryId });
+
     Logger.info("Enquiry created", {
       enquiryId,
       productCount: products.length,
-      email,
+      tenantId,
     });
 
     return enquiry;
@@ -280,13 +348,70 @@ exports.processEnquiry = async (enquiryData) => {
 
     Logger.error("Create enquiry error", {
       message: error.message,
-      email: enquiryData?.email,
+      tenantId,
     });
 
     throw error;
   } finally {
     client.release();
   }
+};
+
+exports.getCustomerEnquiries = async (tenantId, customerId, {
+  page = 1,
+  limit = 20,
+} = {}) => {
+  const safeLimit = Math.min(Number(limit) || 20, 100);
+  const safePage = Math.max(Number(page) || 1, 1);
+  const offset = (safePage - 1) * safeLimit;
+  const values = [tenantId, customerId];
+
+  const countResult = await pool.query(
+    `SELECT COUNT(*)::int AS total
+     FROM ENQUIRIES e
+     WHERE e.tenant_id = $1 AND e.customer_id = $2`,
+    values
+  );
+
+  const dataResult = await pool.query(
+    `SELECT
+       e.id,
+       e.status,
+       e.message,
+       e.created_at,
+       COALESCE(
+         JSON_AGG(
+           JSON_BUILD_OBJECT(
+             'product_id', p.id,
+             'product_name', p.name,
+             'product_slug', p.slug,
+             'quantity', ep.quantity
+           )
+         ) FILTER (WHERE p.id IS NOT NULL),
+         '[]'
+       ) AS products
+     FROM ENQUIRIES e
+     LEFT JOIN ENQUIRY_PRODUCTS ep
+       ON ep.enquiry_id = e.id AND ep.tenant_id = e.tenant_id
+     LEFT JOIN PRODUCTS p
+       ON p.id = ep.product_id AND p.tenant_id = e.tenant_id
+     WHERE e.tenant_id = $1 AND e.customer_id = $2
+     GROUP BY e.id
+     ORDER BY e.created_at DESC
+     LIMIT $3 OFFSET $4`,
+    [...values, safeLimit, offset]
+  );
+
+  const total = Number(countResult.rows[0]?.total || 0);
+  return {
+    data: dataResult.rows,
+    pagination: {
+      total,
+      page: safePage,
+      limit: safeLimit,
+      totalPages: Math.ceil(total / safeLimit),
+    },
+  };
 };
 
 exports.getProductList = async (tenantId, filters = {}) => {
@@ -468,7 +593,7 @@ FROM (
             product_id,
             ROUND(AVG(rating)::numeric,1) AS average_rating
         FROM product_reviews
-        WHERE approved = true
+        WHERE approved = true AND tenant_id = $1
         GROUP BY product_id
     ) pr
         ON p.id = pr.product_id
@@ -508,6 +633,7 @@ FROM (
 SELECT
     p.*,
     c.name AS category_name,
+    col.name AS collection_name,
 
     COALESCE(pr.average_rating,0) AS average_rating,
     COALESCE(pr.review_count,0) AS review_count,
@@ -531,6 +657,9 @@ FROM products p
 LEFT JOIN categories c
     ON c.id = p.category_id
 
+LEFT JOIN collections col
+    ON col.id = p.collection_id AND col.tenant_id = p.tenant_id
+
 LEFT JOIN product_images pi
     ON pi.product_id = p.id
 
@@ -540,7 +669,7 @@ LEFT JOIN (
         COUNT(*)::int AS review_count,
         ROUND(AVG(rating)::numeric,1) AS average_rating
     FROM product_reviews
-    WHERE approved = true
+    WHERE approved = true AND tenant_id = $1
     GROUP BY product_id
 ) pr
     ON pr.product_id = p.id
@@ -550,6 +679,7 @@ WHERE ${whereClause}
 GROUP BY
     p.id,
     c.name,
+    col.name,
     pr.average_rating,
     pr.review_count
 
@@ -583,17 +713,19 @@ OFFSET $${idx + 1}
   }
 };
 
-// Facets for the storefront sidebar: the full category list and price
-// bounds for the tenant's published catalog, independent of pagination —
-// so the filter UI stays stable no matter which page the shopper is on.
+// Facets for the storefront sidebar: the active tenant category hierarchy
+// and price bounds, independent of pagination — so the filter UI stays
+// stable no matter which page the shopper is on. Categories are intentionally
+// not limited to direct product assignments: a parent can be selected to
+// include its published descendants, and an active empty category can still
+// show its customer-friendly configured name.
 exports.getPublicProductFilters = async (tenantId) => {
   try {
     const categoriesResult = await pool.query(
-      `SELECT DISTINCT c.id, c.name
-       FROM PRODUCTS p
-       JOIN CATEGORIES c ON c.id = p.category_id
-       WHERE p.tenant_id = $1 AND p.is_deleted = false AND p.is_published = true
-       ORDER BY c.name ASC`,
+      `SELECT c.id, c.name, c.slug, c.parent_id, c.sort_order, c.is_active
+       FROM CATEGORIES c
+       WHERE c.tenant_id = $1 AND c.is_active = true
+       ORDER BY c.sort_order ASC, c.name ASC, c.id ASC`,
       [tenantId]
     );
 
@@ -656,6 +788,30 @@ exports.getProductById = async (tenantId, productId) => {
   }
 };
 
+exports.getProductBySlug = async (tenantId, slug) => {
+  try {
+    const productResult = await pool.query(
+      `SELECT p.*, c.name as category_name
+       FROM PRODUCTS p
+       LEFT JOIN CATEGORIES c ON p.category_id = c.id
+       WHERE p.slug = $1 AND p.tenant_id = $2 AND p.is_deleted = false`,
+      [slug, tenantId]
+    );
+    if (productResult.rows.length === 0) throw new NotFoundError('Product');
+    const product = productResult.rows[0];
+    const imagesResult = await pool.query(
+      `SELECT id, base_url, storage_path, alt_text, is_primary, sort_order
+       FROM PRODUCT_IMAGES WHERE product_id = $1 AND tenant_id = $2 ORDER BY sort_order ASC`,
+      [product.id, tenantId]
+    );
+    product.images = imagesResult.rows;
+    return product;
+  } catch (error) {
+    Logger.error('Get product by slug error', { slug, tenantId, message: error.message });
+    throw error;
+  }
+};
+
 // FIX: Added newImageFiles parameter. When the edit form includes new image
 // files (multipart request), they are forwarded here from the controller and
 // appended to the product via updateProductImages — reusing the same upload
@@ -674,6 +830,8 @@ exports.updateProduct = async (tenantId, productId, updateData, newImageFiles = 
       collection_id,
       is_published,
       is_featured,
+      is_purchasable,
+      is_enquiry_enabled,
       is_best_sell,
       tags,
       attributes,
@@ -733,11 +891,6 @@ exports.updateProduct = async (tenantId, productId, updateData, newImageFiles = 
       values.push(compare_price);
       paramIndex++;
     }
-    if (stock_qty !== undefined) {
-      updates.push(`stock_qty = $${paramIndex}`);
-      values.push(stock_qty);
-      paramIndex++;
-    }
     if (category_id !== undefined) {
       updates.push(`category_id = $${paramIndex}`);
       values.push(category_id);
@@ -756,6 +909,16 @@ exports.updateProduct = async (tenantId, productId, updateData, newImageFiles = 
     if (is_featured !== undefined) {
       updates.push(`is_featured = $${paramIndex}`);
       values.push(is_featured);
+      paramIndex++;
+    }
+    if (is_purchasable !== undefined) {
+      updates.push(`is_purchasable = $${paramIndex}`);
+      values.push(is_purchasable);
+      paramIndex++;
+    }
+    if (is_enquiry_enabled !== undefined) {
+      updates.push(`is_enquiry_enabled = $${paramIndex}`);
+      values.push(is_enquiry_enabled);
       paramIndex++;
     }
     if (is_best_sell !== undefined) {
@@ -1029,7 +1192,7 @@ const PRODUCT_COLUMNS = new Set([
   "updated_at",
 ]);
 
-exports.getEnquiries = async ({
+exports.getEnquiries = async (tenantId, {
   page = 1,
   limit = 20,
   search = "",
@@ -1042,9 +1205,9 @@ exports.getEnquiries = async ({
     const safePage = Math.max(Number(page) || 1, 1);
     const offset = (safePage - 1) * safeLimit;
 
-    let whereClauses = [];
-    let values = [];
-    let index = 1;
+    let whereClauses = ['e.tenant_id = $1'];
+    let values = [tenantId];
+    let index = 2;
 
     // Clean search
     const trimmedSearch = search?.trim();
@@ -1053,6 +1216,7 @@ exports.getEnquiries = async ({
     if (trimmedSearch) {
       whereClauses.push(`(
         e.name ILIKE $${index} OR
+        e.reference ILIKE $${index} OR
         e.email ILIKE $${index} OR
         p.name ILIKE $${index}
       )`);
@@ -1077,9 +1241,9 @@ exports.getEnquiries = async ({
   SELECT COUNT(DISTINCT e.id)
   FROM enquiries e
   LEFT JOIN enquiry_products ep
-    ON ep.enquiry_id = e.id
+    ON ep.enquiry_id = e.id AND ep.tenant_id = e.tenant_id
   LEFT JOIN products p
-    ON p.id = ep.product_id
+    ON p.id = ep.product_id AND p.tenant_id = e.tenant_id
   ${whereQuery}
 `;
 
@@ -1110,10 +1274,10 @@ SELECT
 FROM enquiries e
 
 LEFT JOIN enquiry_products ep
-    ON ep.enquiry_id = e.id
+    ON ep.enquiry_id = e.id AND ep.tenant_id = e.tenant_id
 
 LEFT JOIN products p
-    ON p.id = ep.product_id
+    ON p.id = ep.product_id AND p.tenant_id = e.tenant_id
 
 ${whereQuery}
 
@@ -1149,11 +1313,11 @@ OFFSET $${index + 1}
 };
 
 // Get Count (for bell icon)
-exports.getEnquiryCount = async ({ status = "new" }) => {
+exports.getEnquiryCount = async (tenantId, status = "new") => {
   try {
     const result = await pool.query(
-      `SELECT COUNT(*) FROM enquiries WHERE status = $1`,
-      [status]
+      `SELECT COUNT(*) FROM enquiries WHERE tenant_id = $1 AND status = $2`,
+      [tenantId, status]
     );
 
     return {
@@ -1166,29 +1330,30 @@ exports.getEnquiryCount = async ({ status = "new" }) => {
 };
 
 // Update Status
-exports.updateEnquiryStatus = async (id, status) => {
+exports.updateEnquiryStatus = async (tenantId, id, status) => {
   const client = await pool.connect();
 
   try {
     const result = await client.query(
       `UPDATE enquiries
        SET status = $1
-       WHERE id = $2
+       WHERE id = $2 AND tenant_id = $3
        RETURNING *`,
-      [status, id]
+      [status, id, tenantId]
     );
 
     if (result.rows.length === 0) {
-      throw new Error("Enquiry not found");
+      throw new NotFoundError('Enquiry');
     }
 
-    Logger.info("Enquiry status updated", { id, status });
+    Logger.info("Enquiry status updated", { id, status, tenantId });
 
     return result.rows[0];
 
   } catch (error) {
     Logger.error("Update enquiry status error", {
       id,
+      tenantId,
       message: error.message,
     });
     throw error;
@@ -1253,8 +1418,8 @@ exports.getAdminReviews = async (
     .range(from, to);
 
   if (error) {
-    console.log("Supabase Error:", error);
-    throw new AppError(error.message || "Unknown error", 500);
+    Logger.error('Admin review lookup failed', { tenantId });
+    throw new AppError('Unable to load reviews', 500);
   }
 
   return {
@@ -1401,7 +1566,7 @@ exports.generateReviewInvitations = async (tenantId, enquiryId) => {
   return invitations;
 };
 
-exports.getReviewInvitation = async (inviteCode) => {
+exports.getReviewInvitation = async (tenantId, inviteCode) => {
   // 1. Fetch review invitation
   const {
     data: invitation,
@@ -1410,11 +1575,8 @@ exports.getReviewInvitation = async (inviteCode) => {
     .from("review_invitations")
     .select("*")
     .eq("invite_code", inviteCode)
+    .eq("tenant_id", tenantId)
     .single();
-
-  console.log("Invite Code:", inviteCode);
-  console.log("Invitation:", invitation);
-  console.log("Invitation Error:", invitationError);
 
   if (invitationError || !invitation) {
     throw new AppError("Review invitation not found.", 404);
@@ -1451,13 +1613,10 @@ exports.getReviewInvitation = async (inviteCode) => {
     .select(`
             id,
             name
-        `)
+    `)
     .eq("id", invitation.product_id)
+    .eq("tenant_id", tenantId)
     .single();
-
-
-  console.log("Product:", product);
-  console.log("Product Error:", productError);
 
 
   if (productError || !product) {
@@ -1476,12 +1635,9 @@ exports.getReviewInvitation = async (inviteCode) => {
             storage_path,
             alt_text,
             is_primary
-        `)
-    .eq("product_id", product.id);
-
-
-  console.log("Product Images:", productImages);
-  console.log("Images Error:", imagesError);
+    `)
+    .eq("product_id", product.id)
+    .eq("tenant_id", tenantId);
 
 
 
@@ -1496,13 +1652,10 @@ exports.getReviewInvitation = async (inviteCode) => {
             name,
             email,
             phone
-        `)
+    `)
     .eq("id", invitation.enquiry_id)
+    .eq("tenant_id", tenantId)
     .single();
-
-
-  console.log("Enquiry:", enquiry);
-  console.log("Enquiry Error:", enquiryError);
 
 
   if (enquiryError || !enquiry) {
@@ -1535,107 +1688,86 @@ exports.getReviewInvitation = async (inviteCode) => {
   };
 };
 
-exports.submitProductReview = async (
-  inviteCode,
-  rating,
-  review
-) => {
-
-  const { data: invitation, error } = await supabase
-    .from("review_invitations")
-    .select("*")
-    .eq("invite_code", inviteCode)
-    .single();
-
-  if (error || !invitation) {
-    throw new AppError("Review invitation not found.", 404);
-  }
-
-  if (
-    invitation.expires_at &&
-    new Date(invitation.expires_at) < new Date()
-  ) {
-    throw new AppError("Review invitation has expired.", 400);
-  }
-
-  if (!["pending", "sent"].includes(invitation.status)) {
-    throw new AppError(
-      "Review invitation is not in a valid state.",
-      400
-    );
-  }
-
+exports.submitProductReview = async (tenantId, inviteCode, rating, review) => {
   if (!Number.isInteger(rating) || rating < 1 || rating > 5) {
-    throw new AppError("Rating must be between 1 and 5.", 400);
+    throw new AppError('Rating must be between 1 and 5.', 400);
   }
 
-  const now = new Date().toISOString();
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const invitationResult = await client.query(
+      `SELECT id, tenant_id, enquiry_id, product_id, status, expires_at
+       FROM review_invitations
+       WHERE invite_code = $1 AND tenant_id = $2
+       FOR UPDATE`,
+      [inviteCode, tenantId]
+    );
+    const invitation = invitationResult.rows[0];
+    if (!invitation) throw new AppError('Review invitation not found.', 404);
+    if (invitation.expires_at && new Date(invitation.expires_at) < new Date()) {
+      throw new AppError('This review invitation has expired.', 400);
+    }
+    if (invitation.status === 'submitted') {
+      throw new ConflictError('This review invitation has already been used');
+    }
+    if (!['pending', 'sent'].includes(invitation.status)) {
+      throw new AppError('Review invitation is not in a valid state.', 400);
+    }
 
-  const {
-    data: enquiry,
-    error: enquiryError,
-  } = await supabase
-    .from("enquiries")
-    .select("id, name, email, phone")
-    .eq("id", invitation.enquiry_id)
-    .single();
+    const [enquiryResult, productResult] = await Promise.all([
+      client.query(
+        'SELECT id, name FROM enquiries WHERE id = $1 AND tenant_id = $2',
+        [invitation.enquiry_id, tenantId]
+      ),
+      client.query(
+        'SELECT id FROM products WHERE id = $1 AND tenant_id = $2',
+        [invitation.product_id, tenantId]
+      ),
+    ]);
+    if (!enquiryResult.rows[0] || !productResult.rows[0]) {
+      throw new AppError('Review invitation is not valid.', 404);
+    }
 
-  if (enquiryError || !enquiry) {
-    throw new AppError("Customer not found.", 404);
-  }
-
-
-  const { data: productReview, error: reviewError } =
-    await supabase
-      .from("product_reviews")
-      .insert({
-        tenant_id: invitation.tenant_id,
-
-        product_id: invitation.product_id,
-
-        enquiry_id: invitation.enquiry_id,
-
-        review_invitation_id: invitation.id,
-
-        customer_name: enquiry.name,
-
+    const reviewResult = await client.query(
+      `INSERT INTO product_reviews
+       (tenant_id, product_id, enquiry_id, review_invitation_id, customer_name, rating, review, approved, created_at, last_upd_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, false, now(), now())
+       RETURNING id, rating, review`,
+      [
+        tenantId,
+        invitation.product_id,
+        invitation.enquiry_id,
+        invitation.id,
+        enquiryResult.rows[0].name,
         rating,
+        typeof review === 'string' && review.trim() ? review.trim() : null,
+      ]
+    );
+    await client.query(
+      `UPDATE review_invitations
+       SET status = 'submitted', submitted_at = now(), last_upd_at = now()
+       WHERE id = $1 AND tenant_id = $2`,
+      [invitation.id, tenantId]
+    );
+    await client.query('COMMIT');
 
-        review: review?.trim() || null,
-
-        approved: false,
-
-        created_at: now,
-
-        last_upd_at: now,
-      })
-      .select()
-      .single();
-
-  if (reviewError) {
-    console.error("Review Insert Error:", reviewError);
-    throw new AppError(reviewError.message, 500);
+    const productReview = reviewResult.rows[0];
+    return {
+      reviewId: productReview.id,
+      rating: productReview.rating,
+      review: productReview.review,
+      status: 'submitted',
+    };
+  } catch (error) {
+    await client.query('ROLLBACK');
+    if (error?.code === '23505' && error?.constraint === 'uq_product_reviews_review_invitation') {
+      throw new ConflictError('This review invitation has already been used');
+    }
+    throw error;
+  } finally {
+    client.release();
   }
-  const { error: updateError } = await supabase
-    .from("review_invitations")
-    .update({
-      status: "submitted",
-      submitted_at: now,
-      last_upd_at: now,
-    })
-    .eq("id", invitation.id);
-
-  if (updateError) {
-    throw new AppError("Failed to update review invitation.", 500);
-  }
-
-  return {
-    reviewId: productReview.id,
-    rating: productReview.rating,
-    review: productReview.review,
-    status: "submitted",
-  };
-
 };
 
 
@@ -1671,6 +1803,7 @@ exports.approveReview = async (tenantId, reviewId, adminUserId) => {
         last_upd_at: now,
       })
       .eq("id", reviewId)
+      .eq("tenant_id", tenantId)
       .select()
       .single();
 
@@ -1685,7 +1818,7 @@ exports.approveReview = async (tenantId, reviewId, adminUserId) => {
   };
 };
 
-exports.getProductReviews = async (productId) => {
+exports.getProductReviews = async (tenantId, productId) => {
 
   // NOTE: previously there were two `getProductReviews` exports in this
   // file — the second silently overwrote the first (so the aggregation
@@ -1701,14 +1834,15 @@ exports.getProductReviews = async (productId) => {
             review,
             customer_name,
             created_at
-        `)
+    `)
     .eq("product_id", productId)
+    .eq("tenant_id", tenantId)
     .eq("approved", true)
     .order("created_at", { ascending: false });
 
   if (error) {
-    console.log("Supabase Error:", error);
-    throw new AppError(error.message, 500);
+    Logger.error('Public product review lookup failed', { tenantId });
+    throw new AppError('Unable to load product reviews', 500);
   }
 
   const totalReviews = reviews.length;
@@ -1750,7 +1884,7 @@ exports.getProductReviews = async (productId) => {
   };
 };
 
-exports.updateReviewStatus = async (reviewId, approved) => {
+exports.updateReviewStatus = async (tenantId, reviewId, approved) => {
 
   if (typeof approved !== "boolean") {
     throw new AppError("Invalid review status", 400);
@@ -1766,6 +1900,7 @@ exports.updateReviewStatus = async (reviewId, approved) => {
       last_upd_at: now,
     })
     .eq("id", reviewId)
+    .eq("tenant_id", tenantId)
     .select()
     .single();
 
@@ -1780,6 +1915,7 @@ exports.updateReviewStatus = async (reviewId, approved) => {
 };
 
 exports.updateReview = async (
+  tenantId,
   reviewId,
   rating,
   review
@@ -1795,6 +1931,7 @@ exports.updateReview = async (
       last_upd_at: now,
     })
     .eq("id", reviewId)
+    .eq("tenant_id", tenantId)
     .select()
     .single();
 

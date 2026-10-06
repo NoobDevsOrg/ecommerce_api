@@ -1,0 +1,11 @@
+const ResponseFormatter = require('../../utils/response');
+const service = require('./notification.service');
+const send = (message, work) => async (req, res) => ResponseFormatter.send(res, { statusCode: 200, message, data: await work(req) });
+exports.listCustomer = send('Notifications fetched successfully', (req) => service.list({ tenantId: req.tenantId, audience: 'CUSTOMER', user: req.user, ...req.query }));
+exports.readCustomer = send('Notification marked read', (req) => service.markRead({ tenantId: req.tenantId, audience: 'CUSTOMER', user: req.user, id: req.params.id }));
+exports.readAllCustomer = send('Notifications marked read', (req) => service.markAllRead({ tenantId: req.tenantId, audience: 'CUSTOMER', user: req.user }));
+exports.listAdmin = send('Notifications fetched successfully', (req) => service.list({ tenantId: req.tenantId, audience: 'STAFF', user: req.user, ...req.query }));
+exports.readAdmin = send('Notification marked read', (req) => service.markRead({ tenantId: req.tenantId, audience: 'STAFF', user: req.user, id: req.params.id }));
+exports.readAllAdmin = send('Notifications marked read', (req) => service.markAllRead({ tenantId: req.tenantId, audience: 'STAFF', user: req.user }));
+exports.getAdminDetail = send('Notification details fetched successfully', (req) => service.getAdminDetail({ tenantId: req.tenantId, user: req.user, id: req.params.id }));
+exports.listAdminForEntity = send('Related notifications fetched successfully', (req) => service.listForEntity({ tenantId: req.tenantId, user: req.user, entityType: req.params.entityType, entityId: req.params.entityId }));

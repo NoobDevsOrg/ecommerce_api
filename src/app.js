@@ -9,12 +9,27 @@ const tenantResolver = require('./middleware/tenantResolver');
 const rateLimiter = require('./middleware/rateLimiter');
 const sanitizeInput = require('./middleware/sanitizeInput');
 const requestLogger = require('./middleware/requestLogger');
+const requestId = require('./middleware/requestId');
 const { errorHandler, notFoundHandler } = require('./middleware/errorHandler');
 const { AppError } = require('./utils/errors');
 const ResponseFormatter = require('./utils/response');
 
 const authRoutes = require('./modules/auth/auth.routes');
+const integrationConfigRoutes = require('./modules/integrations/integrationConfig.routes');
 const productRoutes = require('./modules/products/product.routes');
+const addressRoutes = require('./modules/addresses/address.routes');
+const cartRoutes = require('./modules/cart/cart.routes');
+const orderRoutes = require('./modules/orders/order.routes');
+const checkoutRoutes = require('./modules/checkout/checkout.routes');
+const customerDirectoryRoutes = require('./modules/customers/customerDirectory.routes');
+const shippingSettingsRoutes = require('./modules/shipping/shippingSettings.routes');
+const adminOrderRoutes = require('./modules/orders/adminOrder.routes');
+const { paymentRouter, webhookRouter } = require('./modules/payments/payment.routes');
+const adminPaymentRoutes = require('./modules/payments/adminPayment.routes');
+const inventoryRoutes = require('./modules/inventory/inventory.routes');
+const dashboardRoutes = require('./modules/dashboard/dashboard.routes');
+const { customerRouter: notificationRoutes, adminRouter: adminNotificationRoutes } = require('./modules/notifications/notification.routes');
+const observabilityRoutes = require('./modules/observability/observability.routes');
 
 const app = express();
 app.disable('x-powered-by');
@@ -45,17 +60,23 @@ const corsOptions = {
   },
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'x-tenant-id'],
+  // Kept for existing browser compatibility only. tenantResolver deliberately
+  // ignores this browser-controlled header.
+  allowedHeaders: ['Content-Type', 'Authorization', 'x-tenant-id', 'x-checkout-resume-token'],
 };
 
 app.set('trust proxy', 1);
 app.use(helmet());
 app.use(cors(corsOptions));
 app.options('*', cors(corsOptions));
+app.use(requestId);
+app.use(requestLogger);
+// Razorpay signs the exact original bytes. This route must stay ahead of the
+// global JSON parser and intentionally does not use tenant/customer middleware.
+app.use('/webhooks/razorpay', webhookRouter);
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ limit: '10mb', extended: true }));
 app.use(cookieParser());
-app.use(requestLogger);
 app.use(sanitizeInput);
 app.use((req, _res, next) => {
   if (req.hasSuspiciousInput) {
@@ -72,6 +93,21 @@ app.use(tenantResolver);
 app.use('/uploads', express.static(path.join(__dirname, '../uploads')));
 
 app.use('/auth', authRoutes);
+app.use('/integrations', integrationConfigRoutes);
+app.use('/addresses', addressRoutes);
+app.use('/cart', cartRoutes);
+app.use('/orders', orderRoutes);
+app.use('/checkout', checkoutRoutes);
+app.use('/payments', paymentRouter);
+app.use('/admin/customers', customerDirectoryRoutes);
+app.use('/admin/shipping', shippingSettingsRoutes);
+app.use('/admin/orders', adminOrderRoutes);
+app.use('/admin/payments', adminPaymentRoutes);
+app.use('/admin/inventory', inventoryRoutes);
+app.use('/admin/dashboard', dashboardRoutes);
+app.use('/notifications', notificationRoutes);
+app.use('/admin/notifications', adminNotificationRoutes);
+app.use('/admin', observabilityRoutes);
 app.use('/products', productRoutes);
 
 app.get('/health', (req, res) => {

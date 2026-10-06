@@ -69,6 +69,9 @@ CREATE TABLE CUSTOMERS (
     UNIQUE (tenant_id, email)
 );
 
+CREATE INDEX idx_customers_tenant_created_at
+ON CUSTOMERS(tenant_id, created_at DESC, id DESC);
+
 -- MASTER_OPTIONS Table
 CREATE TABLE MASTER_OPTIONS (
     id            text PRIMARY KEY,
@@ -151,9 +154,11 @@ CREATE TABLE PRODUCTS (
     description     text,
     price           numeric,
     compare_price   numeric,
-    stock_qty       int DEFAULT 0,
+    stock_qty       int NOT NULL DEFAULT 0,
     is_published    boolean DEFAULT false,
     is_featured     boolean DEFAULT false,
+    is_purchasable  boolean NOT NULL DEFAULT true,
+    is_enquiry_enabled boolean NOT NULL DEFAULT true,
     is_deleted      boolean DEFAULT false,
     sort_order      int DEFAULT 0,
     tags            text[],
@@ -166,7 +171,8 @@ CREATE TABLE PRODUCTS (
     updated_by      text DEFAULT 'system',
 
     UNIQUE (tenant_id, slug),
-    UNIQUE (tenant_id, sku)
+    UNIQUE (tenant_id, sku),
+    CHECK (stock_qty >= 0)
 );
 
 CREATE INDEX idx_products_main 
@@ -223,6 +229,9 @@ CREATE TABLE ADDRESSES (
 CREATE INDEX idx_addresses_customer 
 ON ADDRESSES(customer_id, is_deleted);
 
+CREATE INDEX idx_addresses_tenant_customer_active
+ON ADDRESSES(tenant_id, customer_id, is_deleted, is_default DESC, updated_at DESC);
+
 CREATE UNIQUE INDEX uq_customer_default_address
 ON ADDRESSES(customer_id)
 WHERE is_default = true AND is_deleted = false;
@@ -233,6 +242,9 @@ CREATE TABLE ORDERS (
     tenant_id               text REFERENCES TENANTS(id) ON DELETE CASCADE,
     customer_id             text REFERENCES CUSTOMERS(id),
     shipping_address_id     text REFERENCES ADDRESSES(id),
+    -- New order records store an immutable copy, rather than rendering later
+    -- from the mutable saved-address record.
+    shipping_address_snapshot jsonb,
     billing_address_id      text REFERENCES ADDRESSES(id),
     coupon_id               text,
     order_number            text NOT NULL,
@@ -244,6 +256,8 @@ CREATE TABLE ORDERS (
     gst_amount              numeric DEFAULT 0,
     shipping_amount         numeric DEFAULT 0,
     total_amount            numeric NOT NULL,
+    idempotency_key         text,
+    idempotency_fingerprint text,
     currency                text DEFAULT 'INR',
     expected_delivery_date  date,
     notes                   text,
@@ -259,7 +273,8 @@ CREATE TABLE ORDERS (
 
     CHECK (status IN ('PENDING','CONFIRMED','PROCESSING','SHIPPED','DELIVERED','CANCELLED','REFUNDED')),
     CHECK (payment_method IN ('UPI','CARD','NETBANKING','COD')),
-    CHECK (payment_status IN ('PENDING','PAID','FAILED','REFUNDED'))
+    CHECK (payment_status IN ('PENDING','PAID','FAILED','REFUNDED','REQUIRES_RECONCILIATION')),
+    CHECK (shipping_address_snapshot IS NULL OR jsonb_typeof(shipping_address_snapshot) = 'object')
 );
 
 CREATE INDEX idx_orders_main 
@@ -267,6 +282,14 @@ ON ORDERS(tenant_id, status, payment_status, created_at);
 
 CREATE INDEX idx_orders_customer 
 ON ORDERS(customer_id, created_at DESC);
+
+CREATE UNIQUE INDEX uq_orders_tenant_customer_idempotency_key
+ON ORDERS(tenant_id, customer_id, idempotency_key)
+WHERE idempotency_key IS NOT NULL;
+
+CREATE INDEX idx_orders_tenant_customer_created_id
+ON ORDERS(tenant_id, customer_id, created_at DESC, id DESC)
+WHERE is_deleted = false;
 
 -- ORDER_ITEMS Table
 CREATE TABLE ORDER_ITEMS (
@@ -278,6 +301,7 @@ CREATE TABLE ORDER_ITEMS (
     product_sku     text,
     unit_price      numeric NOT NULL,
     quantity        int NOT NULL,
+    line_subtotal   numeric,
     discount_amount numeric DEFAULT 0,
     image_url       text,
     notes           text,
@@ -312,6 +336,8 @@ CREATE TABLE PAYMENTS (
     refund_amount         numeric,
     refunded_at           timestamptz,
     paid_at               timestamptz,
+    verified_at           timestamptz,
+    provider_event_id     text,
     notes                 text,
     is_deleted            boolean DEFAULT false,
     created_at            timestamptz DEFAULT now(),
@@ -320,7 +346,7 @@ CREATE TABLE PAYMENTS (
     updated_by            text DEFAULT 'system',
 
     CHECK (method IN ('UPI','CARD','NETBANKING','COD')),
-    CHECK (status IN ('CREATED','PAID','FAILED','REFUNDED')),
+    CHECK (status IN ('CREATED','PAID','FAILED','REFUNDED','REQUIRES_RECONCILIATION')),
     CHECK (amount >= 0)
 );
 
@@ -330,9 +356,111 @@ ON PAYMENTS(order_id);
 CREATE INDEX idx_payments_status 
 ON PAYMENTS(tenant_id, status, created_at);
 
+-- Immutable local attempt evidence; PAYMENTS remains the current settlement
+-- record for compatibility with existing payment APIs.
+CREATE TABLE PAYMENT_ATTEMPT_EVENTS (
+    id                    text PRIMARY KEY,
+    tenant_id             text NOT NULL REFERENCES TENANTS(id) ON DELETE CASCADE,
+    payment_id            text NOT NULL REFERENCES PAYMENTS(id) ON DELETE CASCADE,
+    order_id              text NOT NULL REFERENCES ORDERS(id) ON DELETE CASCADE,
+    event_type            text NOT NULL CHECK (event_type IN ('PROVIDER_ORDER_ATTACHED','VERIFY_PROVIDER_LOOKUP_FAILED','PAYMENT_CAPTURED','PAYMENT_FAILED')),
+    outcome               text NOT NULL CHECK (outcome IN ('SUCCEEDED','FAILED','UNKNOWN')),
+    provider_order_id     text,
+    provider_payment_id   text,
+    request_id            text,
+    created_at            timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX idx_payment_attempt_events_payment_created
+ON PAYMENT_ATTEMPT_EVENTS(tenant_id, payment_id, created_at DESC, id DESC);
+CREATE INDEX idx_payment_attempt_events_order_created
+ON PAYMENT_ATTEMPT_EVENTS(tenant_id, order_id, created_at DESC, id DESC);
+
+-- Durable in-app notification records and their channel-specific delivery outbox.
+CREATE TABLE NOTIFICATIONS (
+    id text PRIMARY KEY, tenant_id text NOT NULL REFERENCES TENANTS(id) ON DELETE CASCADE,
+    audience_type text NOT NULL, customer_id text REFERENCES CUSTOMERS(id) ON DELETE CASCADE,
+    staff_id text REFERENCES STAFF_USERS(id) ON DELETE CASCADE, recipient_key text NOT NULL,
+    event_type text NOT NULL, entity_type text NOT NULL, entity_id text NOT NULL,
+    title text NOT NULL, message text NOT NULL, action_url text, read_at timestamptz,
+    created_at timestamptz NOT NULL DEFAULT now(),
+    CHECK (audience_type IN ('CUSTOMER','ADMIN','SUPPORT')),
+    CHECK ((audience_type = 'CUSTOMER' AND customer_id IS NOT NULL AND staff_id IS NULL) OR
+      (audience_type IN ('ADMIN','SUPPORT') AND staff_id IS NOT NULL AND customer_id IS NULL)),
+    UNIQUE (tenant_id, event_type, entity_type, entity_id, recipient_key)
+);
+CREATE INDEX idx_notifications_recipient_created ON NOTIFICATIONS(tenant_id, audience_type, customer_id, staff_id, created_at DESC, id DESC);
+CREATE INDEX idx_notifications_unread ON NOTIFICATIONS(tenant_id, audience_type, customer_id, staff_id, created_at DESC) WHERE read_at IS NULL;
+CREATE TABLE NOTIFICATION_DELIVERIES (
+    id text PRIMARY KEY, notification_id text NOT NULL REFERENCES NOTIFICATIONS(id) ON DELETE CASCADE,
+    tenant_id text NOT NULL REFERENCES TENANTS(id) ON DELETE CASCADE, channel text NOT NULL,
+    status text NOT NULL DEFAULT 'PENDING', attempts integer NOT NULL DEFAULT 0, last_error_code text,
+    sent_at timestamptz, created_at timestamptz NOT NULL DEFAULT now(), updated_at timestamptz NOT NULL DEFAULT now(),
+    CHECK (channel IN ('EMAIL','WHATSAPP')), CHECK (status IN ('PENDING','PROCESSING','SENT','FAILED')),
+    UNIQUE (notification_id, channel)
+);
+CREATE INDEX idx_notification_deliveries_pending ON NOTIFICATION_DELIVERIES(tenant_id, status, created_at) WHERE status IN ('PENDING','FAILED');
+CREATE INDEX idx_notification_deliveries_retryable ON NOTIFICATION_DELIVERIES(tenant_id, status, updated_at, created_at) WHERE status IN ('PENDING','FAILED','PROCESSING');
+
+-- INVENTORY_TRANSACTIONS is the immutable source of stock movement history.
+CREATE TABLE INVENTORY_TRANSACTIONS (
+    id                text PRIMARY KEY,
+    tenant_id         text REFERENCES TENANTS(id) ON DELETE CASCADE,
+    product_id        text REFERENCES PRODUCTS(id),
+    order_id          text REFERENCES ORDERS(id) ON DELETE SET NULL,
+    order_item_id     text REFERENCES ORDER_ITEMS(id) ON DELETE SET NULL,
+    transaction_type  text NOT NULL,
+    quantity_delta    int NOT NULL,
+    before_quantity   int NOT NULL,
+    after_quantity    int NOT NULL,
+    reason            text NOT NULL,
+    actor_type        text NOT NULL,
+    actor_id          text,
+    idempotency_key   text,
+    created_at        timestamptz DEFAULT now(),
+    CHECK (transaction_type IN ('SALE','ADMIN_RESTOCK','ADMIN_ADJUSTMENT')),
+    CHECK (quantity_delta <> 0),
+    CHECK (after_quantity >= 0),
+    CHECK ((transaction_type = 'SALE' AND quantity_delta < 0) OR transaction_type <> 'SALE'),
+    CHECK ((transaction_type = 'ADMIN_RESTOCK' AND quantity_delta > 0) OR transaction_type <> 'ADMIN_RESTOCK')
+);
+CREATE UNIQUE INDEX uq_inventory_sale_order_item ON INVENTORY_TRANSACTIONS(order_item_id) WHERE transaction_type = 'SALE';
+CREATE UNIQUE INDEX uq_inventory_idempotency ON INVENTORY_TRANSACTIONS(tenant_id, idempotency_key) WHERE idempotency_key IS NOT NULL;
+CREATE INDEX idx_inventory_tenant_product_created ON INVENTORY_TRANSACTIONS(tenant_id, product_id, created_at DESC, id DESC);
+
 CREATE UNIQUE INDEX uq_paid_payment_per_order
 ON PAYMENTS(order_id)
 WHERE status = 'PAID';
+
+CREATE UNIQUE INDEX uq_payments_razorpay_order_id
+ON PAYMENTS(razorpay_order_id)
+WHERE razorpay_order_id IS NOT NULL AND is_deleted = false;
+
+CREATE UNIQUE INDEX uq_payments_razorpay_payment_id
+ON PAYMENTS(razorpay_payment_id)
+WHERE razorpay_payment_id IS NOT NULL AND is_deleted = false;
+
+-- Operational cases for trusted payments that require a human decision before
+-- they can enter the normal paid/fulfillment path. Provider payloads are not
+-- stored here.
+CREATE TABLE PAYMENT_RECONCILIATIONS (
+    id text PRIMARY KEY,
+    tenant_id text NOT NULL REFERENCES TENANTS(id) ON DELETE CASCADE,
+    payment_id text NOT NULL REFERENCES PAYMENTS(id) ON DELETE CASCADE,
+    order_id text NOT NULL REFERENCES ORDERS(id) ON DELETE CASCADE,
+    reason_code text NOT NULL CHECK (reason_code IN ('INSUFFICIENT_STOCK','AMOUNT_MISMATCH','CURRENCY_MISMATCH','PROVIDER_MAPPING_MISMATCH','UNKNOWN')),
+    reason_message_sanitized text NOT NULL,
+    status text NOT NULL DEFAULT 'OPEN' CHECK (status IN ('OPEN','IN_REVIEW','RESOLVED','ESCALATED')),
+    resolution_type text CHECK (resolution_type IN ('RESOLVE_AFTER_RESTOCK','MANUAL_RESOLUTION','ESCALATE')),
+    resolution_note text,
+    resolved_by text,
+    resolved_at timestamptz,
+    created_at timestamptz NOT NULL DEFAULT now(),
+    updated_at timestamptz NOT NULL DEFAULT now(),
+    UNIQUE (payment_id)
+);
+CREATE INDEX idx_payment_reconciliations_tenant_status_created
+ON PAYMENT_RECONCILIATIONS(tenant_id, status, created_at DESC, id DESC);
+
 
 -- COUPONS Table
 CREATE TABLE COUPONS (
@@ -388,6 +516,7 @@ CREATE TABLE AUTH (
 
     email             text NOT NULL,
     password_hash     text NOT NULL,
+    google_subject    text,
 
     reset_token       text,
     reset_token_exp   timestamptz,
@@ -414,6 +543,27 @@ ON AUTH(tenant_id, email);
 
 CREATE INDEX idx_auth_lock 
 ON AUTH(locked_until);
+
+CREATE UNIQUE INDEX uq_auth_tenant_google_subject
+ON AUTH(tenant_id, google_subject)
+WHERE google_subject IS NOT NULL;
+
+-- Runtime configuration for code-registered integrations. This table stores
+-- only safe, non-secret settings; secrets remain in deployment secret storage.
+CREATE TABLE INTEGRATION_CONFIGURATIONS (
+    id            text PRIMARY KEY,
+    tenant_id     text NOT NULL REFERENCES TENANTS(id) ON DELETE CASCADE,
+    provider_code text NOT NULL,
+    is_enabled    boolean NOT NULL DEFAULT false,
+    mode          text NOT NULL,
+    safe_config   jsonb NOT NULL DEFAULT '{}'::jsonb,
+    created_at    timestamptz NOT NULL DEFAULT now(),
+    created_by    text,
+    updated_at    timestamptz NOT NULL DEFAULT now(),
+    updated_by    text,
+    UNIQUE (tenant_id, provider_code),
+    CHECK (jsonb_typeof(safe_config) = 'object')
+);
 
 -- ORDER_STATUS_HISTORY Table
 CREATE TABLE ORDER_STATUS_HISTORY (

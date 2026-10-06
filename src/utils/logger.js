@@ -1,5 +1,30 @@
 const LOG_LEVEL = process.env.LOG_LEVEL || 'info';
-const SENSITIVE_KEYS = ['password', 'password_hash', 'token', 'authorization', 'cookie'];
+const SENSITIVE_KEYS = [
+  'password',
+  'password_hash',
+  'token',
+  'refreshtoken',
+  'idtoken',
+  'otp',
+  'code',
+  'authorization',
+  'cookie',
+  'headers',
+  'body',
+  'requestbody',
+  'responsebody',
+  'rawbody',
+  'providerpayload',
+  'query',
+  'email',
+  'phone',
+  'whatsapp_number',
+  'signature',
+  'razorpay_signature',
+  'secret',
+  'clientsecret',
+  'database_url',
+];
 
 const levels = {
   error: 0,
@@ -18,11 +43,22 @@ const colors = {
 
 class Logger {
   static maskSensitive(data) {
+    // Buffers stringify as numeric byte properties. Treat them as opaque before
+    // walking object keys so a raw signed provider payload can never leak.
+    if (Buffer.isBuffer(data)) {
+      return '[omitted binary payload]';
+    }
+
     if (Array.isArray(data)) {
       return data.map((item) => this.maskSensitive(item));
     }
 
     if (data && typeof data === 'object') {
+      // This is the shape produced when a Buffer has already crossed a JSON
+      // boundary (for example, an error/context serializer).
+      if (data.type === 'Buffer' && Array.isArray(data.data)) {
+        return '[omitted binary payload]';
+      }
       const clone = {};
       Object.keys(data).forEach((key) => {
         if (SENSITIVE_KEYS.includes(key.toLowerCase())) {

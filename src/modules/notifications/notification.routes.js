@@ -1,0 +1,13 @@
+const express = require('express');
+const { authenticate, authorize } = require('../../middleware/auth');
+const validate = require('../../middleware/validateRequest');
+const { AuthorizationError, asyncHandler } = require('../../utils/errors');
+const controller = require('./notification.controller');
+const schema = require('./notification.validator');
+const customer = (req, _res, next) => (!req.user?.customer_id || req.user.staff_user_id ? next(new AuthorizationError('Customer access is required')) : next());
+const customerRouter = express.Router(); customerRouter.use(authenticate, customer);
+customerRouter.get('/', validate(schema.listSchema), asyncHandler(controller.listCustomer)); customerRouter.post('/read-all', validate(schema.emptySchema), asyncHandler(controller.readAllCustomer)); customerRouter.post('/:id/read', validate(schema.idSchema), asyncHandler(controller.readCustomer));
+const adminRouter = express.Router(); adminRouter.use(authenticate, authorize({ roles: ['ADMIN','SUPPORT'] }));
+adminRouter.get('/', validate(schema.listSchema), asyncHandler(controller.listAdmin)); adminRouter.post('/read-all', validate(schema.emptySchema), asyncHandler(controller.readAllAdmin)); adminRouter.post('/:id/read', validate(schema.idSchema), asyncHandler(controller.readAdmin));
+adminRouter.get('/entity/:entityType/:entityId', asyncHandler(controller.listAdminForEntity)); adminRouter.get('/:id', validate(schema.idSchema), asyncHandler(controller.getAdminDetail));
+module.exports = { customerRouter, adminRouter };

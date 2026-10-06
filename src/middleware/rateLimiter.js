@@ -3,6 +3,7 @@ const ResponseFormatter = require('../utils/response');
 
 const isProduction = process.env.NODE_ENV === 'production';
 const defaultLimit = isProduction ? 120 : 1000;
+const defaultAuthLimit = isProduction ? 10 : 100;
 
 function getRequestScope(req) {
   const requestPath = req.path || '';
@@ -30,3 +31,18 @@ const rateLimiter = rateLimit({
 });
 
 module.exports = rateLimiter;
+
+const authRateLimiter = rateLimit({
+  windowMs: Number(process.env.AUTH_RATE_LIMIT_WINDOW_MS || 15 * 60 * 1000),
+  limit: Number(process.env.AUTH_RATE_LIMIT_MAX || defaultAuthLimit),
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: (req) => `auth:${req.ip || 'unknown'}`,
+  handler: (_req, res) => ResponseFormatter.sendError(res, {
+    statusCode: 429,
+    message: 'Too many sign-in attempts. Please try again later.',
+    errorCode: 'AUTH_RATE_LIMIT_EXCEEDED',
+  }),
+});
+
+module.exports.authRateLimiter = authRateLimiter;

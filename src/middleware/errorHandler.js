@@ -2,8 +2,11 @@ const ResponseFormatter = require('../utils/response');
 const Logger = require('../utils/logger');
 const { AppError } = require('../utils/errors');
 
+const databaseDetails = (error) => (
+  process.env.NODE_ENV === 'production' ? undefined : error.detail
+);
+
 const mapPostgresError = (error) => {
-  console.log("Postgres Error:", error);
   if (!error || !error.code) {
     return null;
   }
@@ -13,7 +16,7 @@ const mapPostgresError = (error) => {
       statusCode: 409,
       message: 'Resource already exists',
       errorCode: 'DB_CONFLICT',
-      details: error.detail,
+      details: databaseDetails(error),
     };
   }
 
@@ -22,7 +25,7 @@ const mapPostgresError = (error) => {
       statusCode: 400,
       message: 'Related resource not found',
       errorCode: 'DB_FOREIGN_KEY_ERROR',
-      details: error.detail,
+      details: databaseDetails(error),
     };
   }
 
@@ -31,7 +34,7 @@ const mapPostgresError = (error) => {
       statusCode: 400,
       message: 'Invalid request format',
       errorCode: 'DB_INVALID_INPUT',
-      details: error.detail,
+      details: databaseDetails(error),
     };
   }
 
@@ -54,12 +57,17 @@ const notFoundHandler = (req, res) => {
 const errorHandler = (err, req, res, _next) => {
   const pgError = mapPostgresError(err);
 
+  const isOperationalError = err instanceof AppError;
   const normalized = pgError || {
-    statusCode: err instanceof AppError ? err.statusCode : err.statusCode || 500,
-    message: err instanceof AppError ? err.message : err.message || 'Internal server error',
-    errorCode: err instanceof AppError ? err.errorCode : err.errorCode || 'INTERNAL_SERVER_ERROR',
+    statusCode: isOperationalError ? err.statusCode : err.statusCode || 500,
+    message: isOperationalError
+      ? err.message
+      : process.env.NODE_ENV === 'production'
+        ? 'Internal server error'
+        : err.message || 'Internal server error',
+    errorCode: isOperationalError ? err.errorCode : err.errorCode || 'INTERNAL_SERVER_ERROR',
     details:
-      err instanceof AppError
+      isOperationalError
         ? err.details
         : process.env.NODE_ENV === 'production'
           ? undefined
@@ -67,12 +75,14 @@ const errorHandler = (err, req, res, _next) => {
   };
 
   Logger.error('Unhandled request error', {
-    path: req.originalUrl,
+    route: req.route?.path ? `${req.baseUrl || ''}${req.route.path}` : 'unmatched',
     method: req.method,
     statusCode: normalized.statusCode,
     errorCode: normalized.errorCode,
     message: normalized.message,
   });
+
+  res.locals.observabilityErrorCode = normalized.errorCode;
 
   return ResponseFormatter.sendError(res, normalized);
 };

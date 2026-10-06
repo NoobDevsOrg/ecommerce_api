@@ -1,12 +1,13 @@
 const express = require('express');
 const multer = require('multer');
 const productController = require('./product.controller');
-const { authenticate, authorize } = require('../../middleware/auth');
+const { authenticate, optionalAuthenticate, authorize } = require('../../middleware/auth');
 const validateRequest = require('../../middleware/validateRequest');
 const {
   createProductSchema,
   updateProductSchema,
   productIdParamsSchema,
+  productSlugParamsSchema,
   getProductsSchema,
   getPublicProductsSchema,
   updateProductImagesSchema,
@@ -16,11 +17,26 @@ const {
   updateHeroBannerSchema,
   publishHeroBannerSchema,
   reorderHeroBannersSchema,
-  enquirySchema
+  testimonialIdSchema,
+  createTestimonialSchema,
+  updateTestimonialSchema,
+  testimonialActiveSchema,
+  reorderTestimonialsSchema,
+  testimonialSettingsSchema,
+  enquirySchema,
+  customerEnquiryHistorySchema,
+  listEnquiriesSchema,
+  enquiryCountSchema,
+  updateEnquiryStatusSchema,
+  generateReviewInvitationSchema,
+  submitReviewSchema,
+  reviewInvitationParamsSchema,
+  reviewParamsSchema,
 } = require('./product.validator');
 const { asyncHandler } = require('../../utils/errors');
 
 const router = express.Router();
+const adminOnly = authorize({ roles: ['ADMIN'] });
 
 const storage = multer.memoryStorage();
 const fileFilter = (req, file, cb) => {
@@ -95,9 +111,19 @@ router.patch(
 );
 router.get('/public/hero-banners', asyncHandler(productController.getPublicHeroBanners));
 
+router.get('/admin/testimonials', authenticate, adminOnly, asyncHandler(productController.listTestimonials));
+router.post('/admin/testimonials', authenticate, adminOnly, upload.single('image'), validateRequest(createTestimonialSchema), asyncHandler(productController.createTestimonial));
+router.put('/admin/testimonials/reorder', authenticate, adminOnly, validateRequest(reorderTestimonialsSchema), asyncHandler(productController.reorderTestimonials));
+router.put('/admin/testimonials/settings', authenticate, adminOnly, validateRequest(testimonialSettingsSchema), asyncHandler(productController.saveTestimonialSettings));
+router.put('/admin/testimonials/:testimonialId', authenticate, adminOnly, upload.single('image'), validateRequest(updateTestimonialSchema), asyncHandler(productController.updateTestimonial));
+router.delete('/admin/testimonials/:testimonialId', authenticate, adminOnly, validateRequest(testimonialIdSchema), asyncHandler(productController.deleteTestimonial));
+router.patch('/admin/testimonials/:testimonialId/active', authenticate, adminOnly, validateRequest(testimonialActiveSchema), asyncHandler(productController.setTestimonialActive));
+router.get('/public/testimonials', asyncHandler(productController.getPublicTestimonials));
+
 router.post(
   '/admin/products',
   authenticate,
+  adminOnly,
   upload.array('images', 10),
   validateRequest(createProductSchema),
   asyncHandler(productController.createProduct)
@@ -105,8 +131,18 @@ router.post(
 
 router.post(
   "/enquiry",
+  optionalAuthenticate,
   validateRequest(enquirySchema),
   asyncHandler(productController.handleEnquiry)
+);
+
+// Customer-only history. The identity is always derived from the verified
+// session; the route deliberately accepts no customer id selector.
+router.get(
+  "/enquiries/me",
+  authenticate,
+  validateRequest(customerEnquiryHistorySchema),
+  asyncHandler(productController.getMyEnquiries)
 );
 
 // ---------------------------------------------------
@@ -117,7 +153,9 @@ router.post(
 // ---------------------------------------------------
 router.get(
   "/enquiries",
-  // validateRequest(enquiryListQuerySchema, "query"),
+  authenticate,
+  adminOnly,
+  validateRequest(listEnquiriesSchema),
   asyncHandler(productController.getEnquiries)
 );
 
@@ -127,6 +165,9 @@ router.get(
 // ---------------------------------------------------
 router.get(
   "/enquiries/count",
+  authenticate,
+  adminOnly,
+  validateRequest(enquiryCountSchema),
   asyncHandler(productController.getEnquiryCount)
 );
 
@@ -136,7 +177,9 @@ router.get(
 // ---------------------------------------------------
 router.put(
   "/enquiries/:id/status",
-  // validateRequest(updateEnquiryStatusSchema),
+  authenticate,
+  adminOnly,
+  validateRequest(updateEnquiryStatusSchema),
   asyncHandler(productController.updateEnquiryStatus)
 );
 
@@ -162,6 +205,7 @@ router.get(
 router.put(
   '/admin/products/:productId',
   authenticate,
+  adminOnly,
   upload.array('images', 10),
   validateRequest(updateProductSchema),
   asyncHandler(productController.updateProduct)
@@ -205,6 +249,12 @@ router.get(
 );
 
 router.get(
+  '/public/products/slug/:slug',
+  validateRequest(productSlugParamsSchema),
+  asyncHandler(productController.getPublicProductBySlug)
+);
+
+router.get(
   '/public/products/:productId',
   validateRequest(productIdParamsSchema),
   asyncHandler(productController.getPublicProductById)
@@ -215,22 +265,27 @@ router.get(
 router.get(
   "/admin/reviews",
   authenticate,
+  adminOnly,
   productController.getAdminReviews
 );
 
 router.post(
   "/enquiries/:enquiryId/review-invitations",
   authenticate,
+  adminOnly,
+  validateRequest(generateReviewInvitationSchema),
   productController.generateReviewInvitations
 );
 
 router.get(
   "/reviews/:inviteCode",
+  validateRequest(reviewInvitationParamsSchema),
   productController.getReviewInvitation
 );
 
 router.post(
   "/reviews/:inviteCode",
+  validateRequest(submitReviewSchema),
   productController.submitProductReview
 );
 
@@ -238,23 +293,27 @@ router.post(
 router.patch(
   "/reviews/:reviewId/approve",
   authenticate,
+  adminOnly,
   productController.approveReview
 );
 
 router.get(
   "/:productId/reviews",
+  validateRequest(reviewParamsSchema),
   productController.getProductReviews
 );
 
 router.patch(
   "/reviews/:reviewId/status",
   authenticate,
+  adminOnly,
   productController.updateReviewStatus
 );
 
 router.patch(
   "/reviews/:reviewId",
   authenticate,
+  adminOnly,
   productController.updateReview
 );
 

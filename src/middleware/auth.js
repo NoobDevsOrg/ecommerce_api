@@ -24,6 +24,10 @@ const authenticate = async (req, res, next) => {
       throw new AuthenticationError('Invalid or expired token');
     }
 
+    if (decoded.tenant_id !== req.tenantId) {
+      throw new AuthenticationError('Token tenant mismatch');
+    }
+
     const result = await pool.query(
       `SELECT a.id, a.email, a.is_active,a.tenant_id,
               s.id as staff_user_id, c.id as customer_id,
@@ -52,7 +56,7 @@ const authenticate = async (req, res, next) => {
       role_code: user.role_code,
     };
 
-    Logger.debug('User authenticated', { userId: user.id, email: user.email });
+    Logger.debug('User authenticated', { userId: user.id, actorType: user.staff_user_id ? 'staff' : 'customer' });
     return next();
   } catch (error) {
     Logger.error('Auth middleware error', {
@@ -96,7 +100,21 @@ const authorize = (...args) => {
   };
 };
 
+// Public endpoints may opt into authentication without making a session a
+// prerequisite. A supplied credential remains authoritative: malformed or
+// invalid credentials are rejected rather than silently treated as a guest.
+// This lets public actions safely associate a valid customer session while
+// retaining their existing guest journey.
+const optionalAuthenticate = (req, res, next) => {
+  if (!req.headers.authorization) {
+    return next();
+  }
+
+  return authenticate(req, res, next);
+};
+
 module.exports = {
   authenticate,
+  optionalAuthenticate,
   authorize,
 };

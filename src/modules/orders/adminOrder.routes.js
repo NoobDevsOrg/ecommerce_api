@@ -1,0 +1,14 @@
+const express = require('express');
+const { authenticate, authorize } = require('../../middleware/auth');
+const validateRequest = require('../../middleware/validateRequest');
+const { asyncHandler } = require('../../utils/errors');
+const controller = require('./adminOrder.controller');
+const { listAdminOrdersSchema, referenceSchema, transitionSchema } = require('./adminOrder.validator');
+const router = express.Router();
+router.use(authenticate, authorize({ roles: ['ADMIN', 'SUPPORT'] }));
+router.get('/', validateRequest(listAdminOrdersSchema), asyncHandler(controller.list));
+router.get('/report', validateRequest(listAdminOrdersSchema), asyncHandler(controller.report));
+router.get('/:orderReference', validateRequest(referenceSchema), asyncHandler(controller.getByReference));
+router.patch('/:orderReference/fulfillment', validateRequest(transitionSchema), asyncHandler(controller.transition));
+router.post('/:orderReference/notifications/retry', validateRequest(referenceSchema), asyncHandler(controller.retryNotifications));
+module.exports = router;
