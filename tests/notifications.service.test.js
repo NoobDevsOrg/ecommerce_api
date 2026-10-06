@@ -55,20 +55,18 @@ test('notification email recipients keep customers distinct from the configured 
   }
 });
 
-test('an Admin delivery without explicit configuration fails closed and never falls back to SMTP sender settings', () => {
+test('an Admin delivery without explicit configuration fails closed and never falls back to email sender settings', () => {
   const previous = process.env.ADMIN_NOTIFICATION_EMAIL;
-  const previousUser = process.env.SMTP_USER; const previousFrom = process.env.SMTP_FROM;
+  const previousFrom = process.env.EMAIL_FROM;
   try {
     delete process.env.ADMIN_NOTIFICATION_EMAIL;
-    process.env.SMTP_USER = 'smtp-user@example.com'; process.env.SMTP_FROM = 'sender@example.com';
+    process.env.EMAIL_FROM = 'sender@example.com';
     assert.throws(() => notifications.recipientFor({ audience_type: 'ADMIN', staff_email: 'staff@example.com' }), (error) => error.code === 'NOTIFICATION_RECIPIENT_NOT_CONFIGURED');
   } finally {
     if (previous === undefined) delete process.env.ADMIN_NOTIFICATION_EMAIL;
     else process.env.ADMIN_NOTIFICATION_EMAIL = previous;
-    if (previousUser === undefined) delete process.env.SMTP_USER;
-    else process.env.SMTP_USER = previousUser;
-    if (previousFrom === undefined) delete process.env.SMTP_FROM;
-    else process.env.SMTP_FROM = previousFrom;
+    if (previousFrom === undefined) delete process.env.EMAIL_FROM;
+    else process.env.EMAIL_FROM = previousFrom;
   }
 });
 

@@ -16,7 +16,7 @@ const { normalizeEmail } = require('./identity');
 const integrationConfigService = require('../integrations/integrationConfig.service');
 const { PURPOSES, createCustomerAuthVerificationService } = require('./customerAuthVerification.service');
 const { sendCustomerAuthOtp } = require('./customerAuthVerificationEmail.service');
-const { smtpFailureDetails } = require('../../utils/smtpTransport');
+const { emailFailureDetails } = require('../../utils/smtpTransport');
 
 const customerVerifications = createCustomerAuthVerificationService({
   sendEmail: sendCustomerAuthOtp,
@@ -275,9 +275,9 @@ exports.requestCustomerLoginOtp = async (tenantId, email) => {
     const challenge = await customerVerifications.create({ tenantId, purpose: PURPOSES.CUSTOMER_LOGIN, email: normalizeEmail(email) });
     return { accepted: true, resendAvailableAt: challenge.resendAvailableAt };
   } catch (error) {
-    // Cooldown/limit errors are safe to return; SMTP failures remain neutral.
+    // Cooldown/limit errors are safe to return; delivery failures remain neutral.
     if (error?.statusCode === 429) throw error;
-    Logger.warn('Customer login OTP delivery failed', { tenantId, smtp: smtpFailureDetails(error) });
+    Logger.warn('Customer login OTP delivery failed', { tenantId, email: emailFailureDetails(error) });
   }
   return { accepted: true, resendAvailableAt: customerVerifications.resendAvailableAt() };
 };
