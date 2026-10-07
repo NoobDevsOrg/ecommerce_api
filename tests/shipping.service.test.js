@@ -40,6 +40,15 @@ test('Tamil Nadu state names, compact spellings, and TN resolve to one canonical
   }
 });
 
+test('legacy India/Tamil Nadu addresses resolve configured India zones without checkout-specific rules', async () => {
+  const db = database(
+    [{ free_shipping_enabled: false, free_shipping_threshold_paise: null }],
+    [{ id: 'tn', name: 'Tamil Nadu', country_code: 'IN', state_name: 'Tamil Nadu', fulfillment_mode: 'FLAT', flat_rate_paise: '15000' }]
+  );
+  const result = await calculateShipping({ tenantId: 't1', subtotalPaise: 100n, shippingAddressSnapshot: address({ country: 'India', state: 'Tamil Nadu' }), database: db });
+  assert.deepEqual(result, { status: 'FLAT', amountPaise: 15000n, zoneId: 'tn', zoneName: 'Tamil Nadu' });
+});
+
 test('Shipping uses the India fallback, and never silently treats an unconfigured destination as free', async () => {
   const restDb = database(
     [{ free_shipping_enabled: false, free_shipping_threshold_paise: null }],

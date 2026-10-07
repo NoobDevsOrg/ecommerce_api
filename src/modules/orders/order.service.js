@@ -171,6 +171,24 @@ const findExistingOrder = async (client, request, lock = false) => {
   return resolveExistingOrder(result.rows[0], request.fingerprint);
 };
 
+// A checkout retry can arrive with a fresh browser idempotency key after a
+// refresh, but still describe the exact same immutable purchase. Resume only
+// an identical pending purchase; different carts, addresses, or totals have a
+// different fingerprint and remain independent orders.
+const findMatchingPendingPurchase = async (client, request) => {
+  const result = await client.query(
+    `SELECT id, order_number
+     FROM ORDERS
+     WHERE tenant_id = $1 AND customer_id = $2 AND idempotency_fingerprint = $3
+       AND status = 'CONFIRMED' AND payment_status = 'PENDING' AND is_deleted = false
+     ORDER BY created_at DESC, id DESC
+     LIMIT 1
+     FOR UPDATE`,
+    [request.tenantId, request.customerId, request.fingerprint]
+  );
+  return result.rows[0] ? { id: result.rows[0].id, orderNumber: result.rows[0].order_number, reused: true } : null;
+};
+
 const checkoutChanged = (details) => new AppError('Some product details changed. Please review your cart before continuing.', 409, 'CHECKOUT_DETAILS_CHANGED', details);
 
 const revalidateProducts = async (client, request) => {
@@ -251,10 +269,22 @@ const createTrustedOrder = async (input) => {
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
+    // Different browser tabs can lose their client idempotency key while
+    // describing the same pending purchase. Serialize that exact fingerprint
+    // before looking it up or inserting so it cannot become two orders.
+    await client.query(
+      'SELECT pg_advisory_xact_lock(hashtext($1), hashtext($2))',
+      [`${request.tenantId}:${request.customerId}`, `pending-purchase:${request.fingerprint}`]
+    );
     const existing = await findExistingOrder(client, request, true);
     if (existing) {
       await client.query('COMMIT');
       return existing;
+    }
+    const matchingPendingPurchase = await findMatchingPendingPurchase(client, request);
+    if (matchingPendingPurchase) {
+      await client.query('COMMIT');
+      return matchingPendingPurchase;
     }
 
     const finalItems = await revalidateProducts(client, request);

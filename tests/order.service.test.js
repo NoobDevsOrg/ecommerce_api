@@ -79,6 +79,13 @@ const createOrderPool = ({ failAt = null, synchronizeIdempotencyReads = false, p
       const row = db.orders.find((order) => order.tenant_id === tenantId && order.customer_id === customerId && order.idempotency_key === key);
       return { rows: row ? [{ id: row.id, order_number: row.order_number, idempotency_fingerprint: row.idempotency_fingerprint }] : [] };
     }
+    if (statement.startsWith('SELECT id, order_number FROM ORDERS') && statement.includes('idempotency_fingerprint = $3')) {
+      const [tenantId, customerId, fingerprint] = params;
+      const row = db.orders.find((order) => order.tenant_id === tenantId && order.customer_id === customerId
+        && order.idempotency_fingerprint === fingerprint && order.status === 'CONFIRMED'
+        && order.payment_status === 'PENDING' && !order.is_deleted);
+      return { rows: row ? [{ id: row.id, order_number: row.order_number }] : [] };
+    }
     if (statement.startsWith('INSERT INTO ORDERS')) {
       if (failAt === 'header') throw new Error('header insert failed');
       const [id, tenantId, customerId, addressId, snapshot, orderNumber, subtotal, discount, gst, shipping, total, key, fingerprint] = params;
@@ -219,6 +226,15 @@ test('idempotency returns the same order on a retry and safely rejects conflicti
   );
 });
 
+test('an identical pending purchase with a fresh browser key resumes rather than duplicates the order', async (t) => {
+  const { service, pool } = loadOrderService(t);
+  const first = await service.createTrustedOrder(trustedOrder({ idempotencyKey: 'checkout-session-one' }));
+  const resumed = await service.createTrustedOrder(trustedOrder({ idempotencyKey: 'checkout-session-after-refresh' }));
+  assert.equal(resumed.reused, true);
+  assert.equal(resumed.id, first.id);
+  assert.equal(pool.state.orders.length, 1);
+});
+
 test('concurrent retries use the database uniqueness boundary so exactly one order is created', async (t) => {
   const { service, pool } = loadOrderService(t, { synchronizeIdempotencyReads: true });
   const [first, second] = await Promise.all([
@@ -234,7 +250,11 @@ test('customer lists and details are tenant/customer scoped, paginated, newest-f
   const { service, pool } = loadOrderService(t);
   pool.state.products.push({ ...pool.state.products[0], tenant_id: 't2' });
   const first = await service.createTrustedOrder(trustedOrder({ idempotencyKey: 'one' }));
-  const second = await service.createTrustedOrder(trustedOrder({ idempotencyKey: 'two' }));
+  const second = await service.createTrustedOrder(trustedOrder({
+    idempotencyKey: 'two',
+    items: [{ ...trustedOrder().items[0], quantity: 1, lineSubtotal: 1250 }],
+    monetary: { subtotal: 1250, discountAmount: 0, taxAmount: 37.5, shippingAmount: 0, total: 1287.5 },
+  }));
   await service.createTrustedOrder(trustedOrder({ tenantId: 't2', idempotencyKey: 'three' }));
   pool.state.queries.length = 0;
   const listed = await service.list('t1', 'customer-1', { page: 1, limit: 1 });
