@@ -70,6 +70,62 @@ test('an Admin delivery without explicit configuration fails closed and never fa
   }
 });
 
+test('shared notification identity snapshots preserve customer identity and configured admin identity without role-name fallbacks', () => {
+  const previousEmail = process.env.ADMIN_NOTIFICATION_EMAIL;
+  const previousName = process.env.ADMIN_NOTIFICATION_NAME;
+  try {
+    process.env.ADMIN_NOTIFICATION_EMAIL = 'orders@example.com';
+    process.env.ADMIN_NOTIFICATION_NAME = 'Lakshmi, Order Desk';
+    assert.deepEqual(
+      notifications.identitySnapshot({ audience: 'CUSTOMER', customerName: 'Ananya Natarajan', customerEmail: 'ananya@example.com' }),
+      { recipientType: 'customer', recipientName: 'Ananya Natarajan', recipientEmail: 'ananya@example.com', customerName: 'Ananya Natarajan', customerEmail: 'ananya@example.com' },
+    );
+    assert.deepEqual(
+      notifications.identitySnapshot({ audience: 'ADMIN', customerName: 'Ananya Natarajan', customerEmail: 'ananya@example.com', staffName: 'Ignored Admin', staffEmail: 'staff@example.com' }),
+      { recipientType: 'admin', recipientName: 'Lakshmi, Order Desk', recipientEmail: 'orders@example.com', customerName: 'Ananya Natarajan', customerEmail: 'ananya@example.com' },
+    );
+    assert.deepEqual(
+      notifications.emailPayloadIdentity({ snapshot: { recipientType: 'customer', recipientName: 'Ananya Natarajan', recipientEmail: 'ananya@example.com', customerName: 'Ananya Natarajan', customerEmail: 'ananya@example.com' }, delivery: { audience_type: 'CUSTOMER' } }),
+      { recipientType: 'customer', recipientName: 'Ananya Natarajan', recipientEmail: 'ananya@example.com', customerName: 'Ananya Natarajan', customerEmail: 'ananya@example.com' },
+    );
+  } finally {
+    if (previousEmail === undefined) delete process.env.ADMIN_NOTIFICATION_EMAIL; else process.env.ADMIN_NOTIFICATION_EMAIL = previousEmail;
+    if (previousName === undefined) delete process.env.ADMIN_NOTIFICATION_NAME; else process.env.ADMIN_NOTIFICATION_NAME = previousName;
+  }
+});
+
+test('email layout renders authoritative identities and only uses Guest or Not provided for a genuine guest enquiry', () => {
+  const customer = notifications.emailLayout({
+    eventType: 'ORDER_PAID', title: 'Payment received', message: 'Thank you.', identity: { recipientName: 'Ananya Natarajan', recipientEmail: 'ananya@example.com' },
+    order: { order_number: 'SGN-PAID-1', total_amount: 1500 },
+  });
+  assert.match(customer.html, /Hello Ananya Natarajan,/);
+  assert.match(customer.html, /Order SGN-PAID-1/);
+  assert.match(customer.html, /Payment:<\/strong> received/);
+  assert.doesNotMatch(customer.html, /Hello Customer,/);
+
+  const guest = notifications.emailLayout({
+    eventType: 'ENQUIRY_RECEIVED', title: 'New enquiry', message: 'A new enquiry arrived.',
+    enquiry: { enquiry_reference: 'ENQ-1', is_guest: true, products: [] },
+  });
+  assert.match(guest.html, /Customer:<\/strong> Guest/);
+  assert.match(guest.html, /Email:<\/strong> Not provided/);
+});
+
+test('shared layout uses event-correct Order, Enquiry, Payment, and review headings', () => {
+  const order = { order_number: 'SGN-1', total_amount: 1000 };
+  for (const eventType of ['ORDER_PAID', 'ORDER_DELIVERED', 'PAYMENT_REQUIRES_RECONCILIATION', 'REVIEW_ELIGIBLE']) {
+    const message = notifications.emailLayout({ eventType, title: eventType, message: 'Update', order });
+    if (eventType === 'REVIEW_ELIGIBLE') assert.match(message.html, /Review for order SGN-1/);
+    else assert.match(message.html, /Order SGN-1/);
+    if (eventType === 'ORDER_PAID') assert.match(message.html, /Payment:<\/strong> received/);
+    if (eventType === 'PAYMENT_REQUIRES_RECONCILIATION') assert.match(message.html, /Payment:<\/strong> under review/);
+  }
+  const enquiry = notifications.emailLayout({ eventType: 'ENQUIRY_RECEIVED', title: 'New enquiry', message: 'Update', enquiry: { enquiry_reference: 'ENQ-2', customer_name: 'Ananya', email: 'ananya@example.com', is_guest: false, products: [] } });
+  assert.match(enquiry.html, /Enquiry ENQ-2/);
+  assert.doesNotMatch(enquiry.html, /Order ENQ-2/);
+});
+
 test('stale PROCESSING deliveries become retryable with bounded backoff using the durable outbox fields', async () => {
   const statements = [];
   const client = {

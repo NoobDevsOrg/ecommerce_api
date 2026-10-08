@@ -69,9 +69,13 @@ test('public catalogue output retains tenant-scoped collection context for store
   assert.match(publicProductControllerSource, /collection_name: product\.collection_name/);
 });
 
-test('public product detail uses the canonical tenant-scoped slug and hides deleted or unpublished products', () => {
+test('public product detail uses the canonical tenant-scoped slug and hides non-production records', () => {
   assert.match(publicProductServiceSource, /exports\.getProductBySlug = async \(tenantId, slug\)/);
-  assert.match(publicProductServiceSource, /WHERE p\.slug = \$1 AND p\.tenant_id = \$2 AND p\.is_deleted = false/);
+  assert.match(publicProductServiceSource, /WHERE p\.slug = \$1 AND p\.tenant_id = \$2 AND \$\{PUBLIC_PRODUCT_PREDICATE\}/);
+  assert.match(publicProductServiceSource, /p\.is_deleted = false/);
+  assert.match(publicProductServiceSource, /p\.is_published = true/);
+  assert.match(publicProductServiceSource, /p\.slug ~ '\^\[a-z0-9\]\+\(-\[a-z0-9\]\+\)\*\$'/);
+  assert.match(publicProductServiceSource, /p\.slug !~ '\(\^\|-\)\(abc\|demo\|test\)\(-\|\$\)'/);
   assert.match(publicProductControllerSource, /getPublicProductBySlug/);
   assert.match(publicProductControllerSource, /if \(!product\.is_published\) throw new NotFoundError\('Product'\)/);
   assert.match(publicProductRoutesSource, /\/public\/products\/slug\/:slug/);

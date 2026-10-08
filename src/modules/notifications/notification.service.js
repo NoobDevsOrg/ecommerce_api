@@ -1,5 +1,6 @@
 const pool = require('../../config/db');
 const { NotFoundError } = require('../../utils/errors');
+const { emailPayloadIdentity } = require('../orders/orderNotification.service');
 
 const recipientWhere = (audience, user, values) => {
   if (audience === 'CUSTOMER') { values.push(user.customer_id); return `n.audience_type='CUSTOMER' AND n.customer_id=$${values.length}`; }
@@ -31,19 +32,20 @@ const markAllRead = async ({ tenantId, audience, user }) => {
 const safeError = (code) => code === 'DELIVERY_CONFIGURATION_ERROR' ? 'Delivery configuration needs attention.' : code === 'DELIVERY_FAILED' ? 'Email delivery failed and will retry if eligible.' : null;
 const getAdminDetail = async ({ tenantId, user, id }) => {
   const values = [tenantId]; const ownership = staffOwnership(user, values); values.push(id);
-  const result = await pool.query(`SELECT n.*, s.email AS staff_email
-    FROM NOTIFICATIONS n LEFT JOIN STAFF_USERS s ON s.id=n.staff_id AND s.tenant_id=n.tenant_id
+  const result = await pool.query(`SELECT n.*, c.full_name AS customer_name,c.email AS customer_email,s.full_name AS staff_name,s.email AS staff_email
+    FROM NOTIFICATIONS n LEFT JOIN CUSTOMERS c ON c.id=n.customer_id AND c.tenant_id=n.tenant_id LEFT JOIN STAFF_USERS s ON s.id=n.staff_id AND s.tenant_id=n.tenant_id
     WHERE n.tenant_id=$1 AND ${ownership} AND n.id=$${values.length}`, values);
   const notification = result.rows[0]; if (!notification) throw new NotFoundError('Notification');
   const deliveries = await pool.query(`SELECT d.*,
     COALESCE((SELECT json_agg(json_build_object('id',a.id,'attemptNumber',a.attempt_number,'status',a.status,'safeError',a.safe_error_code,'startedAt',a.started_at,'completedAt',a.completed_at) ORDER BY a.attempt_number) FROM NOTIFICATION_DELIVERY_ATTEMPTS a WHERE a.delivery_id=d.id), '[]') AS attempt_history
     FROM NOTIFICATION_DELIVERIES d WHERE d.notification_id=$1 AND d.tenant_id=$2 ORDER BY d.channel`, [id, tenantId]);
   const related = notification.content_snapshot?.related || { entity_id: notification.entity_id };
-  const emailRecipient = notification.audience_type === 'ADMIN' && process.env.ADMIN_NOTIFICATION_EMAIL ? process.env.ADMIN_NOTIFICATION_EMAIL : notification.staff_email || null;
+  const identity = emailPayloadIdentity({ snapshot: notification.content_snapshot, delivery: notification });
+  const emailRecipient = identity.recipientEmail || null;
   const email = deliveries.rows.map((delivery) => ({ id: delivery.id, channel: delivery.channel, status: delivery.status, attempts: Number(delivery.attempts || 0), sentAt: delivery.sent_at || null, createdAt: delivery.created_at, updatedAt: delivery.updated_at, nextRetryAt: delivery.status === 'FAILED' ? delivery.updated_at : null, safeError: safeError(delivery.last_error_code), attemptHistory: delivery.attempt_history || [] }));
   const inApp = { channel: 'IN_APP', status: notification.read_at ? 'READ' : 'DELIVERED', createdAt: notification.created_at, readAt: notification.read_at || null, attempts: 1, attemptHistory: [{ attemptNumber: 1, status: 'DELIVERED', startedAt: notification.created_at, completedAt: notification.created_at }] };
   const logicalStatus = notification.read_at ? 'READ' : email.some((delivery) => delivery.status === 'SENT') ? 'DELIVERED' : email.some((delivery) => delivery.status === 'FAILED') ? 'FAILED' : 'PENDING';
-  return { notification: { ...present(notification), entityType: notification.entity_type, entityId: notification.entity_id, audienceType: notification.audience_type, updatedAt: notification.updated_at || notification.created_at, status: logicalStatus, content: { subject: notification.content_snapshot?.title || notification.title, message: notification.content_snapshot?.message || notification.message, ctaLabel: notification.content_snapshot?.action_label || 'Open update', ctaDestination: notification.action_url || null }, related, technical: { notificationId: notification.id, eventType: notification.event_type, eventKey: `${notification.event_type}:${notification.entity_id}`, entityType: notification.entity_type, entityId: notification.entity_id, createdAt: notification.created_at, updatedAt: notification.updated_at || notification.created_at, readAt: notification.read_at || null } }, recipients: [{ audience: notification.audience_type === 'ADMIN' ? 'Admin recipient' : notification.audience_type, address: emailRecipient, channel: 'EMAIL' }].filter((recipient) => recipient.address), channels: [inApp, ...email] };
+  return { notification: { ...present(notification), entityType: notification.entity_type, entityId: notification.entity_id, audienceType: notification.audience_type, updatedAt: notification.updated_at || notification.created_at, status: logicalStatus, content: { subject: notification.content_snapshot?.title || notification.title, message: notification.content_snapshot?.message || notification.message, ctaLabel: notification.content_snapshot?.action_label || 'Open update', ctaDestination: notification.action_url || null }, related, technical: { notificationId: notification.id, eventType: notification.event_type, eventKey: `${notification.event_type}:${notification.entity_id}`, entityType: notification.entity_type, entityId: notification.entity_id, createdAt: notification.created_at, updatedAt: notification.updated_at || notification.created_at, readAt: notification.read_at || null } }, recipients: [{ audience: identity.recipientType, name: identity.recipientName, address: emailRecipient, channel: 'EMAIL' }].filter((recipient) => recipient.address), channels: [inApp, ...email] };
 };
 const listForEntity = async ({ tenantId, user, entityType, entityId }) => {
   const values = [tenantId]; const ownership = staffOwnership(user, values); values.push(entityType, entityId);

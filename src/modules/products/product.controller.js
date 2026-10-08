@@ -401,7 +401,11 @@ exports.getPublicProductById = async (req, res) => {
 
   const product = await productService.getProductById(tenantId, productId);
 
-  if (!product.is_published) {
+  const hasPublicSlug = typeof product.slug === 'string'
+    && /^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(product.slug)
+    && !/(^|-)(abc|demo|test)(-|$)/i.test(product.slug);
+
+  if (!product.is_published || product.is_deleted || !hasPublicSlug) {
     throw new NotFoundError('Product');
   }
 

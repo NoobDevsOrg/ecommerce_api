@@ -26,6 +26,18 @@ const PUBLIC_SORT_MAP = {
   'popularity': { column: 'p.created_at', order: 'DESC' },
 };
 
+// This is the publication boundary for every anonymous product URL. It is
+// deliberately stricter than an admin record: a public product must be live,
+// non-deleted, have a route-safe slug, and not be a sample/demo record.
+const PUBLIC_PRODUCT_PREDICATE = `
+  p.is_deleted = false
+  AND p.is_published = true
+  AND p.slug IS NOT NULL
+  AND BTRIM(p.slug) <> ''
+  AND p.slug ~ '^[a-z0-9]+(-[a-z0-9]+)*$'
+  AND p.slug !~ '(^|-)(abc|demo|test)(-|$)'
+`;
+
 exports.createProduct = async (tenantId, productData, imageFiles = []) => {
   const client = await pool.connect();
 
@@ -534,7 +546,7 @@ exports.getPublicProductList = async (tenantId, filters = {}) => {
     const safeLimit = Math.min(Math.max(Number(limit) || 12, 1), 100);
     const offset = (safePage - 1) * safeLimit;
 
-    const whereParts = [`p.tenant_id = $1`, `p.is_deleted = false`, `p.is_published = true`];
+    const whereParts = [`p.tenant_id = $1`, PUBLIC_PRODUCT_PREDICATE];
     const values = [tenantId];
     let idx = 2;
 
@@ -794,7 +806,7 @@ exports.getProductBySlug = async (tenantId, slug) => {
       `SELECT p.*, c.name as category_name
        FROM PRODUCTS p
        LEFT JOIN CATEGORIES c ON p.category_id = c.id
-       WHERE p.slug = $1 AND p.tenant_id = $2 AND p.is_deleted = false`,
+       WHERE p.slug = $1 AND p.tenant_id = $2 AND ${PUBLIC_PRODUCT_PREDICATE}`,
       [slug, tenantId]
     );
     if (productResult.rows.length === 0) throw new NotFoundError('Product');
