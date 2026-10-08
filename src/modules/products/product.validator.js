@@ -166,7 +166,9 @@ const getProductsSchema = Joi.object({
 const getPublicProductsSchema = Joi.object({
   query: Joi.object({
     page: Joi.number().integer().min(1).default(1),
-    limit: Joi.number().integer().min(1).max(100).default(12),
+    // The sitemap reads the complete public catalogue in one bounded request.
+    // Admin and shopper pagination remain independently bounded elsewhere.
+    limit: Joi.number().integer().min(1).max(1000).default(12),
     search: Joi.string().trim().max(255).allow('', null),
     // Comma-separated category IDs, e.g. ?category=id1,id2
     category: Joi.string().max(1000).allow('', null),

@@ -543,7 +543,7 @@ exports.getPublicProductList = async (tenantId, filters = {}) => {
     } = filters;
 
     const safePage = Math.max(Number(page) || 1, 1);
-    const safeLimit = Math.min(Math.max(Number(limit) || 12, 1), 100);
+    const safeLimit = Math.min(Math.max(Number(limit) || 12, 1), 1000);
     const offset = (safePage - 1) * safeLimit;
 
     const whereParts = [`p.tenant_id = $1`, PUBLIC_PRODUCT_PREDICATE];
